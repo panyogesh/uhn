@@ -16,121 +16,24 @@ defaults:
  
   # Streamer defaults (can be overridden per app)
   tx_stream:
-    ring: []
-    mode: "Planar"
-    spp: 8                           # Reduced for lower latency
     num_channels: 2
     allow_partial: true
     timeout_us: 10                    # Reduced timeout
-    busy_poll: true
-    burst_dequeue: 2                  # Reduced burst size
-    ring_watermark: 32                # Earlier backpressure
   rx_stream:
-    ring: ""
-    mode: "Planar"
-    spp: 8                           # Reduced for lower latency
     num_channels: 4
     allow_partial: true
     timeout_us: 10                    # Reduced timeout
-    busy_poll: true
-    burst_dequeue: 2                  # Reduced burst size
-    ring_watermark: 32                # Earlier backpressure
 
 primary:
   pools:
     # Optimized for SPP=64: 64 × 4B × 4ch = 1024B + headers ≈ 2048B
-    - { name: "ue_inbound_pool",   size: 8192, elt_size: 2048 }
-    - { name: "ue_outbound_pool",  size: 8192, elt_size: 2048 }
-    - { name: "gnb_inbound_pool",  size: 8192, elt_size: 2048 }
-    - { name: "gnb_outbound_pool", size: 8192, elt_size: 2048 }
+    - { name: "inbound_pool",   size: 8192, elt_size: 2048 }
+    - { name: "outbound_pool",  size: 8192, elt_size: 2048 }
 
   rings:
     # Reduced ring sizes for lower latency
-    - { name: "ue_inbound_ring",   size: 512 }
+    - { name: "inbound_ring",   size: 512 }
 
-    # UE: per-channel TX rings (UE -> primary) (SPSC each)
-    - { name: "ue_tx_ch1",         size: 512 }
-    - { name: "ue_tx_ch2",         size: 512 }
-    - { name: "ue_tx_ch3",         size: 512 }
-    - { name: "ue_tx_ch4",         size: 512 }
-
-    # gNB: single RX ring from ChannelProcessor -> gNB app (SPSC)
-    - { name: "gnb_inbound_ring",  size: 512 }
-
-    # gNB: per-channel TX rings (gNB -> primary) (SPSC each)
-    - { name: "gnb_tx_ch1",        size: 512 }
-    - { name: "gnb_tx_ch2",        size: 512 }
-    - { name: "gnb_tx_ch3",        size: 512 }
-    - { name: "gnb_tx_ch4",        size: 512 }
-
-# ── UE secondary (low-latency) ─────────────────────────────────────────────────
-
-ue-app:
-  # RX path (into the app)
-  inbound_ring: "ue_inbound_ring"
-  rx_pool:      "ue_inbound_pool"
-  rx_cores: [2]
-  rx_stream:
-    ring: "ue_inbound_ring"
-    mode: "Planar"
-    spp: 8                           # Reduced for lower latency
-    allow_partial: true
-    timeout_us: 10                    # Reduced timeout
-    busy_poll: true
-    burst_dequeue: 2                  # Reduced burst size
-    ring_watermark: 32                # Earlier backpressure
-
-  # TX path (out of the app)
-  tx_pool: "ue_outbound_pool"
-  tx_cores: [3]
-  tx_stream:
-    ring: ["ue_tx_ch1","ue_tx_ch2","ue_tx_ch3","ue_tx_ch4"]
-    mode: "interleaved"
-    spp: 8                           # Reduced for lower latency
-    allow_partial: true
-    timeout_us: 10                    # Reduced timeout
-    busy_poll: true
-    burst_dequeue: 2                  # Reduced burst size
-    ring_watermark: 32                # Earlier backpressure
-
-  test_transmit:
-    enabled: true
-    pps: 0                            # let spp/burst drive; set if you need pacing
-    burst_size: 2                     # Reduced for lower latency
-    duration_s: 10
-
-# ── gNB secondary (low-latency) ────────────────────────────────────────────────
-
-gnb-app:
-  # RX path (into the app)
-  inbound_ring: "gnb_inbound_ring"
-  rx_pool:      "gnb_inbound_pool"
-  rx_cores: [4]
-  rx_stream:
-    ring: "gnb_inbound_ring"
-    mode: "Planar"
-    spp: 8                           # Reduced for lower latency
-    allow_partial: true
-    timeout_us: 10                    # Reduced timeout
-    busy_poll: true
-    burst_dequeue: 2                  # Reduced burst size
-    ring_watermark: 32                # Earlier backpressure
-
-  # TX path (out of the app)
-  tx_pool: "gnb_outbound_pool"
-  tx_cores: [5]
-  tx_stream:
-    ring: ["gnb_tx_ch1","gnb_tx_ch2","gnb_tx_ch3","gnb_tx_ch4"]
-    mode: "interleaved"
-    spp: 8                           # Reduced for lower latency
-    allow_partial: true
-    timeout_us: 10                    # Reduced timeout
-    busy_poll: true
-    burst_dequeue: 2                  # Reduced burst size
-    ring_watermark: 32                # Earlier backpressure
-
-  test_transmit:
-    enabled: false
-    pps: 0
-    burst_size: 0
-    duration_s: 0
+    # per-channel TX rings (UE -> primary) (SPSC each)
+    - { name: "tx_ch1",         size: 512 }
+    - { name: "tx_ch2",         size: 512 }

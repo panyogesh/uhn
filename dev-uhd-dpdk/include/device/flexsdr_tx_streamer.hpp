@@ -34,7 +34,7 @@ public:
     // (Optional) keep the old ctor if other code still uses it
     flexsdr_tx_streamer() = default;
 
-    ~flexsdr_tx_streamer() override;
+    ~flexsdr_tx_streamer() override = default;
 
     // UHD::tx_streamer
     size_t get_num_channels() const override;
@@ -63,9 +63,6 @@ private:
     unsigned    burst_ = 32;
     bool        allow_partial_ = true;
     std::size_t  num_chans_ = 1;   // default one channel
-    std::vector<void*> staged_;
-    unsigned           staged_i_{0};
-    void flush_();
 };
 
 } //namespace flexsdr
