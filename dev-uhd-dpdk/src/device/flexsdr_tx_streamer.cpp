@@ -109,7 +109,7 @@ size_t flexsdr_tx_streamer::send(
         return 0;
     }
 
-    uint8_t* hdr = static_cast<uint8_t*>(rte_pktmbuf_append(m, hdr_bytes));
+    uint8_t* hdr = reinterpret_cast<uint8_t*>(rte_pktmbuf_append(m, hdr_bytes));
     if (!hdr) { rte_pktmbuf_free(m); return 0; }
 
     // TSF: If metadata has a time_spec, convert to ticks; otherwise 0
@@ -130,7 +130,7 @@ size_t flexsdr_tx_streamer::send(
 
     // Copy SC16 payload (Planar not yet supported here; we assume interleaved channel 0)
     const void* src0 = buffs[0]; // uhd::ref_vector element is a raw pointer
-    int16_t* dst = static_cast<int16_t*>(rte_pktmbuf_append(m, payload_bytes));
+    int16_t* dst = reinterpret_cast<int16_t*>(rte_pktmbuf_append(m, payload_bytes));
     if (!dst) { rte_pktmbuf_free(m); return 0; }
     std::memcpy(dst, src0, payload_bytes);
 

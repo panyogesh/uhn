@@ -34,7 +34,7 @@ public:
     // (Optional) keep the old ctor if other code still uses it
     flexsdr_tx_streamer() = default;
 
-    ~flexsdr_tx_streamer() override = default;
+    ~flexsdr_tx_streamer() override;
 
     // UHD::tx_streamer
     size_t get_num_channels() const override;

@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <functional>
 
 extern "C" {
 #include <rte_ring.h>

@@ -88,7 +88,7 @@ flexsdr_device::~flexsdr_device() = default;
 //==============================
 // DPDK context & ingress
 //==============================
-void flexsdr_device::attach_dpdk_context(std::shared_ptr<DpdkContext> ctx, Role role) {
+void flexsdr_device:: attach_dpdk_context(std::shared_ptr<DpdkContext> ctx, Role role) {
   p_->ctx = std::move(ctx);
   p_->role = role;
   p_->resolved.store(false, std::memory_order_release);
@@ -133,8 +133,19 @@ flexsdr_device::get_rx_stream(const uhd::stream_args_t& args)
   const unsigned    pkts_per_chan = 8;
   const unsigned    burst         = 32;
 
-  return std::make_shared<flexsdr_rx_streamer>(
-      rx_ring, num_chans, _mcr, vrt_hdr_bytes, pkts_per_chan, burst);
+  // Construct params for flexsdr_rx_streamer
+  flexsdr_rx_streamer::Params params;
+  params.num_channels = static_cast<unsigned>(num_chans);
+  params.spp = burst;  // Use burst as samples per packet
+  params.tick_rate = _mcr;
+  params.pkts_per_chan = pkts_per_chan;
+  params.mode = RxFraming::Planar;
+  
+  // Note: The new interface expects FIFOs, but we're passing empty vector for now
+  // This will need to be updated when worker infrastructure is integrated
+  params.fifos.resize(num_chans, nullptr);
+
+  return std::make_shared<flexsdr_rx_streamer>(params);
 }
 
 uhd::tx_streamer::sptr

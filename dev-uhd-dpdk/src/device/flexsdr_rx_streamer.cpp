@@ -18,63 +18,39 @@ static inline void tsf_to_time(double tick_rate, uint64_t tsf, uhd::time_spec_t&
     ts = uhd::time_spec_t(secs);
 }
 
-flexsdr_rx_streamer::flexsdr_rx_streamer(rte_ring* ring,
-                                         std::size_t num_chans,
-                                         double tick_rate_hz,
-                                         std::size_t vrt_hdr_bytes,
-                                         unsigned   packets_per_chan,
-                                         unsigned   /*burst_unused*/,
-                                         std::size_t tsf_offset,
-                                         RxFraming mode)
-: ring_(ring)
-, num_chans_(num_chans ? num_chans : 1)
-, tick_rate_(tick_rate_hz > 0 ? tick_rate_hz : 30.72e6)
-, vrt_hdr_bytes_(vrt_hdr_bytes ? vrt_hdr_bytes : 32)
-, pkts_per_chan_(packets_per_chan ? packets_per_chan : 8)
-, tsf_offset_(tsf_offset)
-, mode_(mode)
-, carry_.resize(num_chans_);
+flexsdr_rx_streamer::flexsdr_rx_streamer(const Params& p)
+: _fifos(p.fifos)
+, _nch(p.num_channels ? p.num_channels : (unsigned)p.fifos.size())
+, _spp(p.spp ? p.spp : 1024)
+, _tick_rate(p.tick_rate)
+, _mode(p.mode)
+, _pkts_per_chan(p.pkts_per_chan ? p.pkts_per_chan : 8)
 {
-    // one FIFO per channel (16k packets/ch by default)
-    fifos_.resize(num_chans_);
-    for (auto& f : fifos_) {
-        f = std::make_shared<fifo_t>(1u << 14);
+    carry_.resize(_nch);
+    
+    // If FIFOs were not provided, create them (for legacy compatibility)
+    if (_fifos.empty() || _fifos[0] == nullptr) {
+        _fifos.resize(_nch);
+        for (auto& f : _fifos) {
+            f = std::make_shared<fifo_t>(1u << 14);
+        }
     }
-
-    // worker configuration
-    worker_cfg_.ring                 = ring_;
-    worker_cfg_.num_channels         = num_chans_;
-    worker_cfg_.packets_per_channel  = pkts_per_chan_;
-    worker_cfg_.vrt_hdr_bytes        = vrt_hdr_bytes_;
-    worker_cfg_.tsf_offset           = tsf_offset_;
-    worker_cfg_.tsf_present          = true; // TSF is always present in your flow
-    worker_cfg_.mode                 = mode_;
-    worker_cfg_.fifos                = &fifos_;
-    worker_cfg_.run_flag             = &run_flag_;
-
-    run_flag_.store(true, std::memory_order_relaxed);
-    rx_worker_ = start_rx_worker(worker_cfg_);
+    
+    // Note: Worker configuration would go here when integrating with RxWorker
+    // For now, we'll rely on the FIFOs being populated externally
 }
 
 flexsdr_rx_streamer::~flexsdr_rx_streamer() {
-    run_flag_.store(false, std::memory_order_relaxed);
-    stop_rx_worker(rx_worker_);
+    // Worker cleanup would go here when integrated
 }
 
-size_t flexsdr_rx_streamer::get_num_channels() const { return num_chans_; }
-size_t flexsdr_rx_streamer::get_max_num_samps() const { return 1u << 16; }
+size_t flexsdr_rx_streamer::get_num_channels() const { return _nch; }
+size_t flexsdr_rx_streamer::get_max_num_samps() const { return _spp; }
 
 void flexsdr_rx_streamer::issue_stream_cmd(const uhd::stream_cmd_t& cmd) {
-    switch (cmd.stream_mode) {
-        case uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS:
-        case uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE:
-            running_.store(true, std::memory_order_release);
-            break;
-        case uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS:
-            running_.store(false, std::memory_order_release);
-            break;
-        default: break;
-    }
+    // For now, just accept the command
+    // In full implementation, this would control RX worker start/stop/continuous modes
+    (void)cmd;
 }
 
 size_t flexsdr_rx_streamer::recv(const buffs_type& buffs,
@@ -84,15 +60,14 @@ size_t flexsdr_rx_streamer::recv(const buffs_type& buffs,
                                  const bool /*one_packet*/)
 {
     md = uhd::rx_metadata_t{};
-    if (!running_.load(std::memory_order_acquire)
-        || buffs.size() < num_chans_
+    if (buffs.size() < _nch
         || nsamps_per_buff == 0)
     {
         md.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
         return 0;
     }
 
-    std::vector<size_t> wr(num_chans_, 0);
+    std::vector<size_t> wr(_nch, 0);
 
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::duration<double>(timeout);
@@ -104,7 +79,7 @@ size_t flexsdr_rx_streamer::recv(const buffs_type& buffs,
     while (true) {
         bool all_full = true;
 
-        for (size_t ch = 0; ch < num_chans_; ++ch) {
+        for (size_t ch = 0; ch < _nch; ++ch) {
             if (wr[ch] >= nsamps_per_buff) continue;
 
             auto* dst = static_cast<int16_t*>(buffs[ch]);
@@ -127,13 +102,13 @@ size_t flexsdr_rx_streamer::recv(const buffs_type& buffs,
             // 2) Pop new packets until we fill the user buffer (or run out)
             while (wr[ch] < nsamps_per_buff) {
                 RxPacket pkt;
-                if (!fifos_[ch]->pop(pkt)) { all_full = false; break; }
+                if (!_fifos[ch]->pop(pkt)) { all_full = false; break; }
 
                 // Latch metadata flags
                 any_sob |= pkt.sob;
                 any_eob |= pkt.eob;
                 if (!tsf_set && pkt.have_tsf) {
-                    tsf_to_time(tick_rate_, pkt.tsf_ticks, ts0);
+                    tsf_to_time(_tick_rate, pkt.tsf_ticks, ts0);
                     tsf_set = true;
                 }
 
@@ -159,7 +134,7 @@ size_t flexsdr_rx_streamer::recv(const buffs_type& buffs,
 
         if (std::chrono::steady_clock::now() >= deadline) {
             size_t got_min = SIZE_MAX;
-            for (size_t c = 0; c < num_chans_; ++c) got_min = std::min(got_min, wr[c]);
+            for (size_t c = 0; c < _nch; ++c) got_min = std::min(got_min, wr[c]);
             if (got_min == 0 || got_min == SIZE_MAX) {
                 md.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
                 return 0;
@@ -182,7 +157,7 @@ size_t flexsdr_rx_streamer::recv(const buffs_type& buffs,
     md.end_of_burst   = any_eob;
 
     size_t got_min = SIZE_MAX;
-    for (size_t c = 0; c < num_chans_; ++c) got_min = std::min(got_min, wr[c]);
+    for (size_t c = 0; c < _nch; ++c) got_min = std::min(got_min, wr[c]);
     return (got_min == SIZE_MAX) ? 0 : got_min;
 }
 
