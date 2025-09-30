@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+package flexsdr;
+
+message ChannelRequest {
+  uint32 chan = 1;
+}
+
+enum UnitType {
+  UNIT_INVALID = 0; // Invalid value
+  UNIT_RX = 114; // ASCII value of 'r'
+  UNIT_TX = 116; // ASCII value of 't'
+  UNIT_BOTH = 98; // ASCII value of 'b'
+}
+
+message ClockRateRequestParams {
+  UnitType unit = 1;
+  double rate = 2;
+}
+
+message ClockRateResponseParams {
+  // Whether the operation was successful
+  bool success = 1;
+
+  // Actual gain value set or retrieved
+  double actual_rate = 2;
+
+  // Error message if the operation failed
+  string error_message = 3;
+}
+
+message GainRequestParams {
+  // Gain value in dB
+  double gain = 1;
+  // Name of the gain stage (empty for default/all)
+  string name = 2;
+  // Channel index
+  uint32 chan = 3;
+}
+
+message GainResponseParams {
+  // Whether the operation was successful
+  bool success = 1;
+  // Actual gain value set or retrieved
+  double actual_gain = 2;
+  // Error message if the operation failed
+  string error_message = 3;
+}
+
+message RateRequestParams {
+  // Gain value in dB
+  double rate = 1;
+
+  // Channel index
+  uint32 chan = 2;
+}
+
+message RateResponseParams {
+  // Whether the operation was successful
+  bool success = 1;
+  
+  // Actual gain value set or retrieved
+  double actual_rate = 2;
+  
+  // Error message if the operation failed
+  string error_message = 3;
+}
+
+message TuneRequest {
+  // Policy options for tunable elements in the RF chain
+  enum Policy {
+    // Do not set this argument, use current setting
+    POLICY_NONE = 0;
+    // Automatically determine the argument's value
+    POLICY_AUTO = 1;
+    // Use the argument's value for the setting
+    POLICY_MANUAL = 2;
+  }
+
+  // Target frequency
+  double target_freq = 1;
+  // RF frequency policy
+  Policy rf_freq_policy = 2;
+  // RF frequency
+  double rf_freq = 3;
+  // DSP frequency policy
+  Policy dsp_freq_policy = 4;
+  // DSP frequency
+  double dsp_freq = 5;
+}
+
+message TuneResult {
+  // Clipped RF frequency
+  double clipped_rf_freq = 1;
+  // Target RF frequency
+  double target_rf_freq = 2;
+  // Actual RF frequency
+  double actual_rf_freq = 3;
+  // Target DSP frequency
+  double target_dsp_freq = 4;
+  // Actual DSP frequency
+  double actual_dsp_freq = 5;
+}
+
+message FrequencyRequestParams {
+  TuneRequest tune_request = 1;
+  ChannelRequest channel_request = 2;
+}
+
+message FrequencyResponseParams {
+  bool success = 1;
+  TuneResult tune_result = 2;
+  string error_message = 3;
+}
+
+message FrequencyValue {
+  bool success = 1;
+  double frequency = 2;
+  string error_message = 3;
+}
+
+message DeviceInfoRequest {
+  // Empty for now, can add fields for specific info requests
+}
+
+message DeviceInfoResponse {
+  string device_name = 1;
+  string serial_number = 2;
+  repeated string rx_antennas = 3;
+  repeated string tx_antennas = 4;
+  double min_rx_gain = 5;
+  double max_rx_gain = 6;
+  double min_tx_gain = 7;
+  double max_tx_gain = 8;
+}
+
+service FlexSDRControl {
+  // Device status
+  rpc GetDeviceInfo (DeviceInfoRequest) returns (DeviceInfoResponse) {}
+
+  // Clock rate
+  rpc SetClockRate(ClockRateRequestParams) returns (ClockRateResponseParams){}
+  rpc GetClockRate(ClockRateRequestParams) returns (ClockRateResponseParams){}
+
+  // Gain control methods
+  rpc SetRxGain(GainRequestParams) returns (GainResponseParams) {}
+  rpc GetRxGain(GainRequestParams) returns (GainResponseParams) {}
+  
+  rpc SetTxGain(GainRequestParams) returns (GainResponseParams) {}
+  rpc GetTxGain(GainRequestParams) returns (GainResponseParams) {}
+
+  rpc SetRxRate(RateRequestParams) returns (RateResponseParams) {}
+  rpc GetRxRate(RateRequestParams) returns (RateResponseParams) {}
+
+  rpc SetTxRate(RateRequestParams) returns (RateResponseParams) {}
+  rpc GetTxRate(RateRequestParams) returns (RateResponseParams) {}
+
+  // Frequency control methods
+  rpc SetRxFreq (FrequencyRequestParams) returns (FrequencyResponseParams) {}
+  rpc GetRxFreq (ChannelRequest) returns (FrequencyValue) {}
+  
+  rpc SetTxFreq (FrequencyRequestParams) returns (FrequencyResponseParams) {}
+  rpc GetTxFreq (ChannelRequest) returns (FrequencyValue) {}
+  // Other methods (e.g., SetRxGain, GetDeviceInfo, etc.)
+}
