@@ -1,5 +1,5 @@
 # =========================
-# gNB-Side FlexSDR Config (Primary-GNB & gNB)
+# gNB-Side FlexSDR Config (Primary-gnb & gNB)
 # =========================
 eal:
   file_prefix: "flexsdr-app"
@@ -9,7 +9,6 @@ eal:
   iova: "va"
 
 defaults:
-  # Choose "primary-gnb" when running the creator on gNB side; "gnb" for the secondary.
   role: gnb               # primary-gnb | gnb
   nb_mbuf: 8192
   mp_cache: 256
@@ -39,22 +38,19 @@ defaults:
   # ---- Interconnect (PG ⇄ PU) base names (CREATED HERE) ----
   interconnect:
     rings: &INTERCONNECT_RINGS
-      - { name: "pg_to_pu",     size: 512 }   # Primary-GNB → Primary-UE
-      - { name: "pu_to_pg",     size: 512 }   # Primary-UE  → Primary-GNB
+      - { name: "pg_to_pu", size: 512 }   # Primary-gnb → Primary-UE
+      - { name: "pu_to_pg", size: 512 }   # Primary-UE  → Primary-gnb
 
 # -------- Roles on gNB-side host --------
 
 # Creator that talks to gNB hardware; creates its OWN IO pools/rings,
-# and ALSO CREATES the interconnect pool + rings for PG ⇄ PU.
+# and ALSO CREATES the interconnect ring pair.
 primary-gnb:
-  # Pools for normal IO
   pools:
-    - { name: "gnb_inbound_pool",     size: 8192, elt_size: 2048 }
-    - { name: "gnb_outbound_pool",    size: 8192, elt_size: 2048 }
-    # Extra pool dedicated for the interconnect path
-    - { name: "interconnect_pool", size: 4096, elt_size: 2048 }
+    - { name: "gnb_inbound_pool",  n: 8192, elt_size: 2048, cache: 256 }
+    - { name: "gnb_outbound_pool", n: 8192, elt_size: 2048, cache: 256 }
+    - { name: "interconnect_pool", n: 4096, elt_size: 2048, cache: 256 }
 
-  # Normal IO streams
   tx_stream:
     <<: *TX_DEFAULT
     rings: *TX_RINGS
