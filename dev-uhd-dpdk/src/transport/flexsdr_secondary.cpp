@@ -1,136 +1,131 @@
 #include "transport/flexsdr_secondary.hpp"
+#include "conf/config_params.hpp"
 
 #include <cstdio>
 #include <cstring>
-#include <stdexcept>
-#include <algorithm>
+#include <string>
+#include <vector>
 
-// DPDK
-#include <rte_log.h>
-#include <rte_eal.h>
-#include <rte_errno.h>
-#include <rte_mempool.h>
+#include <rte_version.h>
 #include <rte_ring.h>
+#include <rte_mempool.h>
+#include <rte_errno.h>
 
-using namespace flexsdr;
-using flexsdr::conf::RingSpec;
-using flexsdr::conf::PoolSpec;
-using flexsdr::conf::Role;
+namespace flexsdr {
 
-// ----------------- ctor -----------------
+using conf::PrimaryConfig;
+using conf::RingSpec;
+
+static inline unsigned ring_size(const rte_ring* r) {
+#if defined(RTE_VERSION) && RTE_VERSION >= RTE_VERSION_NUM(24, 11, 0, 0)
+  return rte_ring_get_size(r);
+#else
+  return r->size;
+#endif
+}
+
+// forward decl (defined in config_params.cpp)
+namespace conf { int load_from_yaml(const char* path, PrimaryConfig& out); }
+
+static const char* role_str(conf::Role r) {
+  switch (r) {
+    case conf::Role::ue:          return "ue";
+    case conf::Role::gnb:         return "gnb";
+    case conf::Role::primary_ue:  return "primary-ue";
+    case conf::Role::primary_gnb: return "primary-gnb";
+  }
+  return "unknown";
+}
+
 FlexSDRSecondary::FlexSDRSecondary(std::string yaml_path)
   : yaml_path_(std::move(yaml_path)) {}
 
-// ----------------- config load -----------------
-void FlexSDRSecondary::load_config() {
-  cfg_ = flexsdr::conf::PrimaryConfig::load(yaml_path_);
-
-  // (Optional) Log a short summary
-  std::printf("[cfg] (secondary) role=%s, ring_size=%u\n",
-              flexsdr::conf::PrimaryConfig::to_string(cfg_.defaults.role).c_str(),
-              cfg_.defaults.ring_size);
-}
-
-// ----------------- resource init -----------------
 int FlexSDRSecondary::init_resources() {
-  // 1) Optional pools defined under role block (usually none for secondaries)
-  {
-    int rc = lookup_role_pools_();
-    if (rc < 0) return rc;
-  }
+  int rc = load_config_();
+  if (rc) return rc;
 
-  // 2) TX/RX rings lookup
-  {
-    int rc = lookup_rings_();
-    if (rc < 0) return rc;
-  }
+  std::printf("[cfg] (secondary) role=%s, ring_size=%u\n",
+              role_str(cfg_.defaults.role), cfg_.defaults.ring_size);
 
-  // 3) Interconnect rings lookup
-  {
-    int rc = lookup_interconnect_rings_();
-    if (rc < 0) return rc;
-  }
-
+  if ((rc = lookup_pools_()))    return rc;
+  if ((rc = lookup_rings_tx_())) return rc;
+  if ((rc = lookup_rings_rx_())) return rc;
   return 0;
 }
 
-// ----------------- pools (optional) -----------------
-int FlexSDRSecondary::lookup_role_pools_() {
-  const auto& pools_cfg = cfg_.effective_pools();
-  if (pools_cfg.empty()) return 0;
+// don’t peek into ring internals; resolve via lookup and check membership
+rte_ring* FlexSDRSecondary::ring_by_name(const std::string& name) const {
+  rte_ring* candidate = rte_ring_lookup(name.c_str());
+  if (!candidate) return nullptr;
+  for (auto* r : tx_rings_) if (r == candidate) return r;
+  for (auto* r : rx_rings_) if (r == candidate) return r;
+  return nullptr;
+}
 
-  for (const auto& p : pools_cfg) {
-    // Materialize the name using the *secondary* role (e.g., "ue_inbound_pool")
-    const std::string mat = cfg_.materialize_name(p.name);
-    rte_mempool* mp = nullptr;
-    int rc = lookup_pool_(mat, &mp);
-    if (rc < 0) {
-      std::fprintf(stderr, "[pool] lookup failed: %s rc=%d rte_errno=%d\n",
-                   mat.c_str(), rc, rte_errno);
-      return rc;
+int FlexSDRSecondary::load_config_() {
+  return conf::load_from_yaml(yaml_path_.c_str(), cfg_);
+}
+
+int FlexSDRSecondary::lookup_pools_() {
+  if (!cfg_.primary_ue.has_value()) return 0; // no pools to lookup
+  for (const auto& p : cfg_.primary_ue->pools) {
+    rte_mempool* mp = rte_mempool_lookup(p.name.c_str());
+    if (!mp) {
+      int err = rte_errno;
+      std::printf("[pool] lookup failed: %s rc=%d rte_errno=%d\n",
+                  p.name.c_str(), -err, err);
+      return -err ? -err : -1;
     }
+    std::printf("[pool] found: %s\n", p.name.c_str());
     pools_.push_back(mp);
-    materialized_pool_names_.push_back(mat);
-    std::printf("[pool] found: %s\n", mat.c_str());
   }
   return 0;
 }
 
-int FlexSDRSecondary::lookup_pool_(const std::string& name, rte_mempool** out) {
-  *out = nullptr;
-  rte_mempool* mp = rte_mempool_lookup(name.c_str());
-
-  if (!mp) return -rte_errno ? -rte_errno : -1;
-  *out = mp;
-  return 0;
+static inline const std::vector<RingSpec>&
+collect_tx_rings_(const PrimaryConfig& cfg) {
+  if (cfg.primary_ue && !cfg.primary_ue->rings.tx.empty())
+    return cfg.primary_ue->rings.tx;
+  return cfg.defaults.tx_stream.rings;
 }
 
-// ----------------- rings (TX/RX) -----------------
-int FlexSDRSecondary::lookup_rings_() {
-  auto tx = cfg_.materialized_tx_rings();
-  auto rx = cfg_.materialized_rx_rings();
-  tx.insert(tx.end(), rx.begin(), rx.end());
+static inline const std::vector<RingSpec>&
+collect_rx_rings_(const PrimaryConfig& cfg) {
+  if (cfg.primary_ue && !cfg.primary_ue->rings.rx.empty())
+    return cfg.primary_ue->rings.rx;
+  return cfg.defaults.rx_stream.rings;
+}
 
-  for (const auto& r : tx) {
-    rte_ring* rr = nullptr;
-    int rc = lookup_ring_(r.name, &rr);
-    if (rc < 0) {
-      std::fprintf(stderr, "[ring] lookup failed: %s rc=%d rte_errno=%d\n",
-                   r.name.c_str(), rc, rte_errno);
-      return rc;
+int FlexSDRSecondary::lookup_rings_tx_() {
+  const auto& rings = collect_tx_rings_(cfg_);
+  for (const auto& r : rings) {
+    rte_ring* ptr = rte_ring_lookup(r.name.c_str());
+    if (!ptr) {
+      int err = rte_errno;
+      std::printf("[ring] lookup failed: %s rc=%d rte_errno=%d\n",
+                  r.name.c_str(), -err, err);
+      return -err ? -err : -1;
     }
-    rings_.push_back(rr);
-    materialized_ring_names_.push_back(r.name);
-    std::printf("[ring] found: %s\n", r.name.c_str());
+    std::printf("[ring] tx found: %s (size=%u)\n", r.name.c_str(), ring_size(ptr));
+    tx_rings_.push_back(ptr);
   }
   return 0;
 }
 
-// ----------------- interconnect rings -----------------
-int FlexSDRSecondary::lookup_interconnect_rings_() {
-  auto ic = cfg_.materialized_interconnect_rings();
-  if (ic.empty()) return 0;
-
-  for (const auto& r : ic) {
-    rte_ring* rr = nullptr;
-    int rc = lookup_ring_(r.name, &rr);
-    if (rc < 0) {
-      std::fprintf(stderr, "[ic] lookup failed: %s rc=%d rte_errno=%d\n",
-                   r.name.c_str(), rc, rte_errno);
-      return rc;
+int FlexSDRSecondary::lookup_rings_rx_() {
+  const auto& rings = collect_rx_rings_(cfg_);
+  for (const auto& r : rings) {
+    rte_ring* ptr = rte_ring_lookup(r.name.c_str());
+    if (!ptr) {
+      int err = rte_errno;
+      std::printf("[ring] lookup failed: %s rc=%d rte_errno=%d\n",
+                  r.name.c_str(), -err, err);
+      return -err ? -err : -1;
     }
-    rings_.push_back(rr);
-    materialized_ring_names_.push_back(r.name);
-    std::printf("[ic] found: %s\n", r.name.c_str());
+    std::printf("[ring] rx found: %s (size=%u)\n", r.name.c_str(), ring_size(ptr));
+    rx_rings_.push_back(ptr);
   }
   return 0;
 }
 
-// ----------------- util -----------------
-int FlexSDRSecondary::lookup_ring_(const std::string& name, rte_ring** out) {
-  *out = nullptr;
-  rte_ring* r = rte_ring_lookup(name.c_str());
-  if (!r) return -rte_errno ? -rte_errno : -1;
-  *out = r;
-  return 0;
-}
+} // namespace flexsdr

@@ -1,67 +1,51 @@
 #pragma once
-
 #include <string>
 #include <vector>
-#include <optional>
-#include <memory>
 
-#include "conf/config_params.hpp"
-
-// DPDK
 #include <rte_mempool.h>
-#include <rte_mbuf.h>
 #include <rte_ring.h>
+
+#include "conf/config_params.hpp"   // flexsdr::conf::PrimaryConfig
 
 namespace flexsdr {
 
 class FlexSDRSecondary {
 public:
-  // Construct with a path to either configuration-ue.yaml or configuration-gnb.yaml
   explicit FlexSDRSecondary(std::string yaml_path);
-  ~FlexSDRSecondary() = default;
 
-  // Parse YAML and stage internal plans (no DPDK objects touched yet)
-  void load_config();
-
-  // Look up DPDK objects according to role (ue/gnb):
-  // - Lookup rings (tx/rx) and interconnect rings
-  // - Optionally lookup mempools if present in role block
-  // Returns 0 on success; negative errno otherwise.
+  // Attach to resources created by primary (rings + pools).
+  // Returns 0 on success; negative rte-style on failure.
   int init_resources();
 
-  // Accessors
-  const flexsdr::conf::PrimaryConfig& cfg() const { return cfg_; }
-  flexsdr::conf::Role role() const { return cfg_.defaults.role; }
+  // ---- Read-only accessors for tests / higher layers ----
+  const std::vector<rte_ring*>&    tx_rings() const { return tx_rings_; }
+  const std::vector<rte_ring*>&    rx_rings() const { return rx_rings_; }
+  const std::vector<rte_mempool*>& pools()    const { return pools_;    }
 
-  // Materialized (prefixed) ring/pool names we resolved
-  const std::vector<std::string>& found_rings() const { return materialized_ring_names_; }
-  const std::vector<std::string>& found_pools() const { return materialized_pool_names_; }
+  rte_ring*    ring_by_name(const std::string& name) const;
+  rte_mempool* pool_by_name(const std::string& name) const;
 
-  // Raw pointers if callers need them
-  const std::vector<rte_ring*>&     rings() const { return rings_; }
-  const std::vector<rte_mempool*>&  pools() const { return pools_; }
-
-private:
-  // Helpers
-  int  lookup_role_pools_();            // if any are defined under ue/gnb blocks
-  int  lookup_rings_();                 // tx/rx
-  int  lookup_interconnect_rings_();    // pg_to_pu / pu_to_pg
-
-  // Utilities
-  int  lookup_ring_(const std::string& name, rte_ring** out);
-  int  lookup_pool_(const std::string& name, rte_mempool** out); // optional; will try standard lookup
+  // Diagnostics
+  const conf::PrimaryConfig& cfg() const { return cfg_; }
 
 private:
-  std::string yaml_path_;
-  flexsdr::conf::PrimaryConfig cfg_;
+  // Internals
+  int load_config_();
+  int lookup_pools_();
+  int lookup_rings_tx_();
+  int lookup_rings_rx_();
 
-  // Resolved objects
-  std::vector<rte_ring*>     rings_;
-  std::vector<rte_mempool*>  pools_;
+  // Strict lookups (return -errno on failure)
+  int lookup_ring_strict_(const std::string& name, rte_ring** out);
+  int lookup_pool_strict_(const std::string& name, rte_mempool** out);
 
-  // For logging/debug
-  std::vector<std::string> materialized_ring_names_;
-  std::vector<std::string> materialized_pool_names_;
+  // Data
+  std::string                 yaml_path_;
+  conf::PrimaryConfig         cfg_{};
+
+  std::vector<rte_mempool*>   pools_;
+  std::vector<rte_ring*>      tx_rings_;
+  std::vector<rte_ring*>      rx_rings_;
 };
 
 } // namespace flexsdr
