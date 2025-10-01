@@ -101,27 +101,29 @@ int FlexSDRPrimary::create_pools_() {
     const unsigned    esz  = p.elt_size;
     const unsigned    cache = p.cache_size ? p.cache_size : cfg_.defaults.mp_cache;
 
-    rte_mempool* mp = rte_mempool_create(
+    // Use rte_pktmbuf_pool_create for proper packet mbuf pools
+    // data_room should be the application data size - DPDK adds headroom automatically
+    // For DPDK 24.11, ensure we have enough total space by adding RTE_PKTMBUF_HEADROOM
+    const unsigned data_room = esz + RTE_PKTMBUF_HEADROOM;
+    
+    rte_mempool* mp = rte_pktmbuf_pool_create(
         name.c_str(),
         n,                 // number of elements
-        esz,               // element size
         cache,             // per-lcore cache
-        0,                 // private size
-        nullptr, nullptr,  // pool ctor
-        nullptr, nullptr,  // obj ctor
-        SOCKET_ID_ANY,
-        0);
+        0,                 // private data size
+        data_room,         // total buffer size including headroom
+        SOCKET_ID_ANY);
 
     if (!mp) {
       int err = rte_errno;
       std::fprintf(stderr,
-                   "[pool] create failed: %s (n=%u elt=%u cache=%u) rc=%d rte_errno=%d\n",
-                   name.c_str(), n, esz, cache, -1, err);
+                   "[pool] create failed: %s (n=%u data_room=%u cache=%u) rc=%d rte_errno=%d (%s)\n",
+                   name.c_str(), n, data_room, cache, -1, err, rte_strerror(err));
       return -1;
     }
 
-    std::fprintf(stderr, "[pool] created: %s (n=%u elt=%u cache=%u)\n",
-                 name.c_str(), n, esz, cache);
+    std::fprintf(stderr, "[pool] created: %s (n=%u data_room=%u cache=%u)\n",
+                 name.c_str(), n, data_room, cache);
     pools_.push_back(mp);
   }
   return 0;
