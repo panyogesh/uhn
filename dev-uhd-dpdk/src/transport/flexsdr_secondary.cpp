@@ -1,127 +1,140 @@
 #include "flexsdr_secondary.hpp"
-#include "dpdk_common.hpp"
 
-#include <sstream>
-#include <iostream>
-#include <type_traits>
-#include <utility>
-#include <vector>
-#include <string>
+#include <cstdio>
+#include <cstring>
+#include <stdexcept>
+#include <algorithm>
 
-extern "C" {
-#include <rte_ring.h>
-#include <rte_mempool.h>
+// DPDK
+#include <rte_log.h>
+#include <rte_eal.h>
 #include <rte_errno.h>
+#include <rte_mempool.h>
+#include <rte_ring.h>
+
+using namespace flexsdr;
+using flexsdr::conf::RingSpec;
+using flexsdr::conf::PoolSpec;
+using flexsdr::conf::Role;
+
+// ----------------- ctor -----------------
+FlexSDRSecondary::FlexSDRSecondary(std::string yaml_path)
+  : yaml_path_(std::move(yaml_path)) {}
+
+// ----------------- config load -----------------
+void FlexSDRSecondary::load_config() {
+  cfg_ = flexsdr::conf::PrimaryConfig::load(yaml_path_);
+  // (Optional) Log a short summary
+  std::printf("[cfg] (secondary) role=%s, ring_size=%u, prefix_with_role=%s, sep='%s'\n",
+              flexsdr::conf::PrimaryConfig::to_string(cfg_.defaults.role).c_str(),
+              cfg_.defaults.ring_size,
+              cfg_.naming.prefix_with_role ? "true" : "false",
+              cfg_.naming.separator.c_str());
 }
 
-namespace flexsdr {
-
-// ---------- C++17-safe SFINAE: detect .ring vs .rings ----------
-
-template <typename T, typename = void>
-struct has_member_ring : std::false_type {};
-
-template <typename T>
-struct has_member_ring<T, std::void_t<decltype(std::declval<const T>().ring)>>
-  : std::true_type {};
-
-// Return the TX ring list regardless of whether the member is named `ring` or `rings`
-template <typename S>
-static inline const std::vector<std::string>& get_tx_rings(const S& s) {
-  if constexpr (has_member_ring<S>::value) {
-    return s.ring;
-  } else {
-    return s.rings; // assume plural exists in your struct
-  }
-}
-
-// ---------- lookups ----------
-
-static rte_ring* lookup_ring(const std::string& name) {
-  rte_ring* r = rte_ring_lookup(name.c_str());
-  if (!r) {
-    std::cerr << "[DPDK][ERR] ring_lookup('" << name << "') failed: "
-              << rte_strerror(rte_errno) << "\n";
-  }
-  return r;
-}
-
-static rte_mempool* lookup_pool(const std::string& name) {
-  rte_mempool* mp = rte_mempool_lookup(name.c_str());
-  if (!mp) {
-    std::cerr << "[DPDK][ERR] mempool_lookup('" << name << "') failed: "
-              << rte_strerror(rte_errno) << "\n";
-  }
-  return mp;
-}
-
-// ---------- main attach ----------
-
-int attach_secondary_app(const PrimaryConfig& primary,
-                         const DefaultConfig& /*defaults*/,
-                         const char* app_name,
-                         Handles& out,
-                         std::string& error_out)
-{
-  // Inbound ring (single)
-  if (!app.inbound_ring.empty()) {
-    auto* rin = lookup_ring(app.inbound_ring);
-    if (!rin) { error_out = "Missing inbound ring: " + app.inbound_ring; return -1; }
-    out.rings[app.inbound_ring] = rin;
-
-    // Watermark is advisory only on modern DPDK
-    if (app.rx_stream.ring_watermark) {
-      std::cerr << "[DPDK][NOTE] (" << app_name
-                << ") rx ring_watermark requested (" << app.rx_stream.ring_watermark
-                << ") but watermark API is removed in recent DPDK; ignoring.\n";
-    }
+// ----------------- resource init -----------------
+int FlexSDRSecondary::init_resources() {
+  // 1) Optional pools defined under role block (usually none for secondaries)
+  {
+    int rc = lookup_role_pools_();
+    if (rc < 0) return rc;
   }
 
-  // TX rings
-  const auto& tx_rings = get_tx_rings(app.tx_stream);
-  if (!tx_rings.empty()) {
-    for (const auto& rn : tx_rings) {
-      auto* r = lookup_ring(rn);
-      if (!r) { error_out = std::string("Missing TX ring: ") + rn; return -2; }
-      out.rings[rn] = r;
-    }
-    if (app.tx_stream.ring_watermark) {
-      std::cerr << "[DPDK][NOTE] (" << app_name
-                << ") tx ring_watermark requested (" << app.tx_stream.ring_watermark
-                << ") but watermark API is removed; ignoring.\n";
-    }
+  // 2) TX/RX rings lookup
+  {
+    int rc = lookup_rings_();
+    if (rc < 0) return rc;
   }
 
-  // Pools
-  auto* rxp = lookup_pool(app.rx_pool);
-  if (!rxp) { error_out = "Missing rx_pool: " + app.rx_pool; return -3; }
-  out.pools[app.rx_pool] = rxp;
+  // 3) Interconnect rings lookup
+  {
+    int rc = lookup_interconnect_rings_();
+    if (rc < 0) return rc;
+  }
 
-  auto* txp = lookup_pool(app.tx_pool);
-  if (!txp) { error_out = "Missing tx_pool: " + app.tx_pool; return -4; }
-  out.pools[app.tx_pool] = txp;
-
-  // Conservative payload sanity (advisory only)
-  const uint32_t bytes_per_cplx = 4; // "cs16" I16,Q16
-  const uint32_t spp = app.tx_stream.spp ? app.tx_stream.spp
-                                         : (app.rx_stream.spp ? app.rx_stream.spp : 64);
-  const uint32_t channels = tx_rings.empty()
-                              ? 1u
-                              : static_cast<uint32_t>(tx_rings.size());
-  const uint32_t payload = spp * channels * bytes_per_cplx;
-
-  const uint32_t rx_room = pool_data_room(rxp);
-  const uint32_t tx_room = pool_data_room(txp);
-  if (rx_room && rx_room < payload)
-    std::cerr << "[DPDK][WARN] (" << app_name << ") rx_pool '" << app.rx_pool
-              << "' data_room=" << rx_room << " < payload=" << payload << "\n";
-  if (tx_room && tx_room < payload)
-    std::cerr << "[DPDK][WARN] (" << app_name << ") tx_pool '" << app.tx_pool
-              << "' data_room=" << tx_room << " < payload=" << payload << "\n";
-
-  std::cout << "[DPDK] (" << app_name << ") attached OK (rings=" << out.rings.size()
-            << ", pools=" << out.pools.size() << ")\n";
   return 0;
 }
 
-} // namespace flexsdr
+// ----------------- pools (optional) -----------------
+int FlexSDRSecondary::lookup_role_pools_() {
+  const auto& pools_cfg = cfg_.effective_pools();
+  if (pools_cfg.empty()) return 0;
+
+  for (const auto& p : pools_cfg) {
+    // Materialize the name using the *secondary* role (e.g., "ue_inbound_pool")
+    const std::string mat = cfg_.naming.materialize(cfg_.defaults.role, p.name);
+    rte_mempool* mp = nullptr;
+    int rc = lookup_pool_(mat, &mp);
+    if (rc < 0) {
+      std::fprintf(stderr, "[pool] lookup failed: %s rc=%d rte_errno=%d\n",
+                   mat.c_str(), rc, rte_errno);
+      return rc;
+    }
+    pools_.push_back(mp);
+    materialized_pool_names_.push_back(mat);
+    std::printf("[pool] found: %s\n", mat.c_str());
+  }
+  return 0;
+}
+
+int FlexSDRSecondary::lookup_pool_(const std::string& name, rte_mempool** out) {
+  *out = nullptr;
+#if RTE_VERSION >= RTE_VERSION_NUM(21, 11, 0, 0)  // adjust if you want version branching
+  rte_mempool* mp = rte_mempool_lookup(name.c_str());
+#else
+  rte_mempool* mp = rte_mempool_lookup(name.c_str());
+#endif
+  if (!mp) return -rte_errno ? -rte_errno : -1;
+  *out = mp;
+  return 0;
+}
+
+// ----------------- rings (TX/RX) -----------------
+int FlexSDRSecondary::lookup_rings_() {
+  auto tx = cfg_.materialized_tx_rings();
+  auto rx = cfg_.materialized_rx_rings();
+  tx.insert(tx.end(), rx.begin(), rx.end());
+
+  for (const auto& r : tx) {
+    rte_ring* rr = nullptr;
+    int rc = lookup_ring_(r.name, &rr);
+    if (rc < 0) {
+      std::fprintf(stderr, "[ring] lookup failed: %s rc=%d rte_errno=%d\n",
+                   r.name.c_str(), rc, rte_errno);
+      return rc;
+    }
+    rings_.push_back(rr);
+    materialized_ring_names_.push_back(r.name);
+    std::printf("[ring] found: %s\n", r.name.c_str());
+  }
+  return 0;
+}
+
+// ----------------- interconnect rings -----------------
+int FlexSDRSecondary::lookup_interconnect_rings_() {
+  auto ic = cfg_.materialized_interconnect_rings();
+  if (ic.empty()) return 0;
+
+  for (const auto& r : ic) {
+    rte_ring* rr = nullptr;
+    int rc = lookup_ring_(r.name, &rr);
+    if (rc < 0) {
+      std::fprintf(stderr, "[ic] lookup failed: %s rc=%d rte_errno=%d\n",
+                   r.name.c_str(), rc, rte_errno);
+      return rc;
+    }
+    rings_.push_back(rr);
+    materialized_ring_names_.push_back(r.name);
+    std::printf("[ic] found: %s\n", r.name.c_str());
+  }
+  return 0;
+}
+
+// ----------------- util -----------------
+int FlexSDRSecondary::lookup_ring_(const std::string& name, rte_ring** out) {
+  *out = nullptr;
+  rte_ring* r = rte_ring_lookup(name.c_str());
+  if (!r) return -rte_errno ? -rte_errno : -1;
+  *out = r;
+  return 0;
+}

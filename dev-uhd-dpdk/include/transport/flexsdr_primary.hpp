@@ -37,7 +37,7 @@ public:
   const std::vector<std::string>& created_or_found_rings() const { return materialized_ring_names_; }
   const std::vector<std::string>& created_or_found_pools() const { return materialized_pool_names_; }
 
-public:
+private:
   // Helpers
   bool is_creator_role() const;  // primary-ue or primary-gnb
   int  create_pools_();
