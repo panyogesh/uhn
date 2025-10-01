@@ -1,207 +1,177 @@
 #include "transport/flexsdr_primary.hpp"
+#include "conf/config_params.hpp"
+
 #include <cstdio>
 #include <cstring>
-#include <cerrno>
+#include <string>
+#include <vector>
+#include <optional>
+
+// DPDK
+#include <rte_config.h>
+#include <rte_eal.h>
 #include <rte_errno.h>
 #include <rte_mempool.h>
-#include <rte_ring.h>
 #include <rte_mbuf.h>
+#include <rte_ring.h>
+#include <rte_lcore.h>
+#include <rte_memory.h>
 
-using std::string;
 namespace flexsdr {
 
-// ---------------- helpers ----------------
+// --------------------------- tiny helpers -----------------------------------
 
-static inline bool bad_name(const std::string& s) {
-  return s.empty();
+static const char* role_str(conf::Role r) {
+  switch (r) {
+    case conf::Role::PrimaryUe:  return "primary-ue";
+    case conf::Role::PrimaryGnb: return "primary-gnb";
+    case conf::Role::Ue:         return "ue";
+    case conf::Role::Gnb:        return "gnb";
+    default:                     return "unknown";
+  }
 }
 
-int FlexSDRPrimary::create_ring_(const string& name, unsigned size, rte_ring** out) {
-  if (bad_name(name)) {
-    std::fprintf(stderr, "[ring] ERROR: empty name for create\n");
-    return -EINVAL;
-  }
-  rte_errno = 0;
-  rte_ring* r = rte_ring_create(name.c_str(), size, rte_socket_id(), RING_F_SC_DEQ);
-  if (!r) {
-    int err = rte_errno;
-    if (err == EEXIST) {
-      // creator should be idempotent—if exists already, just re-use
-      r = rte_ring_lookup(name.c_str());
-      if (!r) {
-        std::fprintf(stderr, "[ring] create(%s) EEXIST then lookup failed: rte_errno=%d\n",
-                     name.c_str(), rte_errno);
-        return -rte_errno ? -rte_errno : -EIO;
-      }
-    } else {
-      std::fprintf(stderr, "[ring] create(%s,size=%u) failed: rte_errno=%d\n",
-                   name.c_str(), size, err);
-      return -err ? -err : -EIO;
-    }
-  }
-  *out = r;
-  return 0;
+static inline const std::vector<conf::RingSpec>&
+collect_tx_rings_(const conf::PrimaryConfig& cfg) {
+  // Prefer explicit role block; fall back to defaults
+  if (cfg.primary_ue && !cfg.primary_ue->tx_stream->rings.empty())
+    return cfg.primary_ue->tx_stream->rings;
+  if (cfg.primary_gnb && !cfg.primary_gnb->tx_stream->rings.empty())
+    return cfg.primary_gnb->tx_stream->rings;
+  return cfg.defaults.tx_stream.rings;
 }
 
-int FlexSDRPrimary::lookup_ring_(const string& name, rte_ring** out) {
-  if (bad_name(name)) {
-    std::fprintf(stderr, "[ring] ERROR: empty name for lookup\n");
-    return -EINVAL;
-  }
-  rte_errno = 0;
-  rte_ring* r = rte_ring_lookup(name.c_str());
-  if (!r) {
-    std::fprintf(stderr, "[ring] lookup(%s) failed: rte_errno=%d\n",
-                 name.c_str(), rte_errno);
-    return -ENOENT;
-  }
-  *out = r;
-  return 0;
+static inline const std::vector<conf::RingSpec>&
+collect_rx_rings_(const conf::PrimaryConfig& cfg) {
+  if (cfg.primary_ue && !cfg.primary_ue->rx_stream->rings.empty())
+    return cfg.primary_ue->rx_stream->rings;
+  if (cfg.primary_gnb && !cfg.primary_gnb->rx_stream->rings.empty())
+    return cfg.primary_gnb->rx_stream->rings;
+  return cfg.defaults.rx_stream.rings;
 }
 
-int FlexSDRPrimary::lookup_pool_(const string& name, rte_mempool** out) {
-  if (bad_name(name)) {
-    std::fprintf(stderr, "[pool] ERROR: empty name for lookup\n");
-    return -EINVAL;
-  }
-  rte_errno = 0;
-  rte_mempool* mp = rte_mempool_lookup(name.c_str());
-  if (!mp) {
-    std::fprintf(stderr, "[pool] lookup(%s) failed: rte_errno=%d\n",
-                 name.c_str(), rte_errno);
-    return -ENOENT;
-  }
-  *out = mp;
-  return 0;
+static inline const std::vector<conf::PoolSpec>&
+collect_pools_(const conf::PrimaryConfig& cfg) {
+  if (cfg.primary_ue && !cfg.primary_ue->pools.empty())
+    return cfg.primary_ue->pools;
+  if (cfg.primary_gnb && !cfg.primary_gnb->pools.empty())
+    return cfg.primary_gnb->pools;
+  static const std::vector<conf::PoolSpec> kEmpty;
+  return kEmpty;
 }
 
-// ---------------- lifecycle ----------------
+// --------------------------- FlexSDRPrimary ---------------------------------
 
 FlexSDRPrimary::FlexSDRPrimary(std::string yaml_path)
-: yaml_path_(std::move(yaml_path)) {}
+  : yaml_path_(std::move(yaml_path)) {
+  (void)load_config_();
+  std::fprintf(stderr, "[primary] constructed FlexSDRPrimary\n");
+}
 
 int FlexSDRPrimary::load_config_() {
   int rc = conf::load_from_yaml(yaml_path_.c_str(), cfg_);
   if (rc) {
-    std::fprintf(stderr, "[cfg] load_from_yaml(%s) failed rc=%d\n",
-                 yaml_path_.c_str(), rc);
+    std::fprintf(stderr, "[primary] load_from_yaml failed rc=%d\n", rc);
+    return rc;
   }
-  return rc;
+  return 0;
 }
 
 int FlexSDRPrimary::init_resources() {
-  if (int rc = load_config_(); rc) return rc;
+  std::fprintf(stderr, "[primary] init_resources: role=%s ring_size=%u\n",
+               role_str(cfg_.defaults.role), cfg_.defaults.ring_size);
 
-  std::fprintf(stderr, "[primary] init_resources: ring_size=%u\n",
-               cfg_.defaults.ring_size);
-
-  // --- Always CREATE our local rings/pools from primary-ue ---
-  if (!cfg_.primary_ue) {
-    std::fprintf(stderr, "[primary] ERROR: missing 'primary-ue' section\n");
-    return -EINVAL;
-  }
-
+  // 1) pools
   if (int rc = create_pools_(); rc) return rc;
+
+  // 2) TX rings
   if (int rc = create_rings_tx_(); rc) return rc;
+
+  // 3) RX rings
   if (int rc = create_rings_rx_(); rc) return rc;
 
-  std::fprintf(stderr, "[primary] resources ready\n");
   return 0;
 }
 
-// ---------------- creators ----------------
-
 int FlexSDRPrimary::create_pools_() {
-  const auto& rcfg = *cfg_.primary_ue;
-  for (const auto& p : rcfg.pools) {
-    if (bad_name(p.name)) {
-      std::fprintf(stderr, "[pool] ERROR: empty pool name in config\n");
-      return -EINVAL;
-    }
-    // create mempool; layout: n= p.size, elt= p.elt_size, cache = cfg_.defaults.mp_cache (if you keep it)
-    rte_errno = 0;
-    rte_mempool* mp = rte_pktmbuf_pool_create(
-        p.name.c_str(), p.size, cfg_.defaults.mp_cache, 0, p.elt_size, rte_socket_id());
+  const auto& pools = collect_pools_(cfg_);
+  for (const auto& p : pools) {
+    const std::string name = p.name;
+    const unsigned    n    = p.size;
+    const unsigned    esz  = p.elt_size;
+    const unsigned    cache = p.cache_size ? p.cache_size : cfg_.defaults.mp_cache;
+
+    rte_mempool* mp = rte_mempool_create(
+        name.c_str(),
+        n,                 // number of elements
+        esz,               // element size
+        cache,             // per-lcore cache
+        0,                 // private size
+        nullptr, nullptr,  // pool ctor
+        nullptr, nullptr,  // obj ctor
+        SOCKET_ID_ANY,
+        0);
+
     if (!mp) {
       int err = rte_errno;
-      if (err == EEXIST) {
-        // reuse
-        mp = rte_mempool_lookup(p.name.c_str());
-        if (!mp) {
-          std::fprintf(stderr, "[pool] EEXIST then lookup failed: %s rte_errno=%d\n",
-                       p.name.c_str(), rte_errno);
-          return -rte_errno ? -rte_errno : -EIO;
-        }
-      } else {
-        std::fprintf(stderr, "[pool] create(%s) failed: rte_errno=%d\n",
-                     p.name.c_str(), err);
-        return -err ? -err : -EIO;
-      }
+      std::fprintf(stderr,
+                   "[pool] create failed: %s (n=%u elt=%u cache=%u) rc=%d rte_errno=%d\n",
+                   name.c_str(), n, esz, cache, -1, err);
+      return -1;
     }
+
+    std::fprintf(stderr, "[pool] created: %s (n=%u elt=%u cache=%u)\n",
+                 name.c_str(), n, esz, cache);
     pools_.push_back(mp);
-    std::fprintf(stderr, "[pool] created: %s (n=%u elt=%u)\n",
-                 p.name.c_str(), p.size, p.elt_size);
   }
   return 0;
 }
 
-static inline const std::vector<conf::RingSpec>& pick_tx(const conf::PrimaryConfig& cfg) {
-  if (cfg.primary_ue && cfg.primary_ue->tx_stream && !cfg.primary_ue->tx_stream->rings.empty())
-    return cfg.primary_ue->tx_stream->rings;
-  return cfg.defaults.tx_stream.rings;
-}
-static inline const std::vector<conf::RingSpec>& pick_rx(const conf::PrimaryConfig& cfg) {
-  if (cfg.primary_ue && cfg.primary_ue->rx_stream && !cfg.primary_ue->rx_stream->rings.empty())
-    return cfg.primary_ue->rx_stream->rings;
-  return cfg.defaults.rx_stream.rings;
+int FlexSDRPrimary::create_ring_(const std::string& name, unsigned size, rte_ring** out) {
+  *out = nullptr;
+
+  // Create with default flags; SINGLE-PRODUCER/SINGLE-CONSUMER are optional.
+  rte_ring* r = rte_ring_create(name.c_str(), size, rte_socket_id(), 0);
+  if (r) {
+    *out = r;
+    return 0;
+  }
+
+  // If it already exists, just look it up
+  if (rte_errno == EEXIST) {
+    r = rte_ring_lookup(name.c_str());
+    if (r) {
+      *out = r;
+      return 0;
+    }
+  }
+
+  std::fprintf(stderr, "[ring] create failed: %s (size=%u) rc=%d rte_errno=%d\n",
+               name.c_str(), size, -1, rte_errno);
+  return -1;
 }
 
 int FlexSDRPrimary::create_rings_tx_() {
-  const auto& rings = pick_tx(cfg_);
+  const auto& rings = collect_tx_rings_(cfg_);
   for (const auto& r : rings) {
     rte_ring* ptr = nullptr;
-    if (int rc = create_ring_(r.name, r.size ? r.size : cfg_.defaults.ring_size, &ptr); rc) return rc;
+    int rc = create_ring_(r.name, r.size ? r.size : cfg_.defaults.ring_size, &ptr);
+    if (rc) return rc;
+    std::fprintf(stderr, "[ring] created TX: %s (size=%u)\n",
+                 r.name.c_str(), rte_ring_get_size(ptr));
     tx_rings_.push_back(ptr);
-    std::fprintf(stderr, "[ring] created tx: %s\n", r.name.c_str());
   }
   return 0;
 }
 
 int FlexSDRPrimary::create_rings_rx_() {
-  const auto& rings = pick_rx(cfg_);
+  const auto& rings = collect_rx_rings_(cfg_);
   for (const auto& r : rings) {
     rte_ring* ptr = nullptr;
-    if (int rc = create_ring_(r.name, r.size ? r.size : cfg_.defaults.ring_size, &ptr); rc) return rc;
-    rx_rings_.push_back(ptr);
-    std::fprintf(stderr, "[ring] created rx: %s\n", r.name.c_str());
-  }
-  return 0;
-}
-
-int FlexSDRSecondary::lookup_interconnect_() {
-  // defaults.interconnect is a value (not optional) in the current schema.
-  const auto& ic = cfg_.defaults.interconnect;
-
-  if (ic.rings.empty()) {
-    std::fprintf(stderr, "[secondary] no interconnect rings configured in defaults\n");
-    return 0; // not an error
-  }
-
-  std::fprintf(stderr, "[secondary] looking up interconnect rings from defaults…\n");
-  for (const auto& r : ic.rings) {
-    rte_ring* ptr = nullptr;
-    int rc = lookup_ring_(r.name, &ptr);
-    if (rc) {
-      std::fprintf(stderr, "[secondary] interconnect ring lookup failed: %s (rc=%d rte_errno=%d)\n",
-                   r.name.c_str(), rc, rte_errno);
-      return rc;
-    }
-    std::fprintf(stderr, "[secondary] interconnect ring ok: %s (size=%u)\n",
+    int rc = create_ring_(r.name, r.size ? r.size : cfg_.defaults.ring_size, &ptr);
+    if (rc) return rc;
+    std::fprintf(stderr, "[ring] created RX: %s (size=%u)\n",
                  r.name.c_str(), rte_ring_get_size(ptr));
-
-    // If you want to expose them to the dumper, choose where to store them.
-    // For now, we’ll just attach them to rx_rings_ (or tx_rings_) as needed.
-    // If you want to keep them separate, add a dedicated container in the class.
     rx_rings_.push_back(ptr);
   }
   return 0;

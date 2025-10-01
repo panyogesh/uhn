@@ -1,27 +1,52 @@
 #include "conf/config_params.hpp"
+
 #include <yaml-cpp/yaml.h>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 
-namespace flexsdr { namespace conf {
+namespace flexsdr {
+namespace conf {
 
-// ---------------- helpers ----------------
+// --------------------------- small helpers ----------------------------------
+
 static inline unsigned as_u32(const YAML::Node& n, unsigned def) {
-  return (n && n.IsScalar()) ? n.as<unsigned>() : def;
+  if (!n) return def;
+  try {
+    return n.as<unsigned>();
+  } catch (...) {
+    return def;
+  }
 }
+
 static inline bool as_bool(const YAML::Node& n, bool def) {
-  return (n && n.IsScalar()) ? n.as<bool>() : def;
+  if (!n) return def;
+  try {
+    return n.as<bool>();
+  } catch (...) {
+    return def;
+  }
 }
+
 static inline std::string as_str(const YAML::Node& n, const std::string& def = {}) {
-  return (n && n.IsScalar()) ? n.as<std::string>() : def;
+  if (!n) return def;
+  try {
+    return n.as<std::string>();
+  } catch (...) {
+    return def;
+  }
 }
 
-static inline std::string role_from_string(const std::string& s, const std::string& def) {
-  // Keep as string; if you want strict validation, add it here.
-  return s.empty() ? def : s;
+// role <-> string
+static inline Role role_from_string(const std::string& s, Role def) {
+  if (s == "primary-ue")  return Role::PrimaryUe;
+  if (s == "primary-gnb") return Role::PrimaryGnb;
+  if (s == "ue")          return Role::Ue;
+  if (s == "gnb")         return Role::Gnb;
+  return def;
 }
 
+// rings
 static inline std::vector<RingSpec> parse_ring_list(const YAML::Node& n, unsigned def_size) {
   std::vector<RingSpec> out;
   if (!n || !n.IsSequence()) return out;
@@ -29,124 +54,151 @@ static inline std::vector<RingSpec> parse_ring_list(const YAML::Node& n, unsigne
     RingSpec r{};
     r.name = as_str(it["name"]);
     r.size = as_u32(it["size"], def_size);
-    if (!r.name.empty()) out.push_back(r);
+    if (!r.name.empty())
+      out.push_back(r);
   }
   return out;
 }
 
-static inline Stream parse_stream(const YAML::Node& n, const Stream& def, unsigned def_ring_size) {
-  Stream s = def;
-  if (!n || !n.IsMap()) return s;
-
-  s.mode          = as_str(n["mode"],          def.mode);
-  s.num_channels  = as_u32(n["num_channels"],  def.num_channels);
-  s.allow_partial = as_bool(n["allow_partial"], def.allow_partial);
-  s.timeout_us    = as_u32(n["timeout_us"],    def.timeout_us);
-  s.busy_poll     = as_bool(n["busy_poll"],     def.busy_poll);
-
-  if (const auto nr = n["rings"]; nr) {
-    s.rings = parse_ring_list(nr, def_ring_size);
-  }
-  return s;
-}
-
-static inline std::vector<PoolSpec> parse_pool_list(const YAML::Node& n) {
+// pools
+static inline std::vector<PoolSpec> parse_pool_list(const YAML::Node& n, unsigned def_cache) {
   std::vector<PoolSpec> out;
   if (!n || !n.IsSequence()) return out;
   for (const auto& it : n) {
     PoolSpec p{};
-    p.name     = as_str(it["name"]);
-    p.size     = as_u32(it["size"], 8192);
-    p.elt_size = as_u32(it["elt_size"], 2048);
-    p.cache    = as_u32(it["cache"], 0); // 0 => use defaults.mp_cache at runtime
-    if (!p.name.empty()) out.push_back(p);
+    p.name       = as_str(it["name"]);
+    p.size       = as_u32(it["size"],    8192);
+    p.elt_size   = as_u32(it["elt_size"], 2048);
+    // Allow either explicit cache_size or fall back to defaults.mp_cache
+    p.cache_size = as_u32(it["cache_size"], def_cache);
+    if (!p.name.empty())
+      out.push_back(p);
   }
   return out;
 }
 
-static inline std::optional<InterconnectConfig> parse_interconnect(const YAML::Node& n, unsigned def_ring_size) {
-  if (!n || !n.IsMap()) return std::nullopt;
-  InterconnectConfig ic{};
-  ic.rings = parse_ring_list(n["rings"], def_ring_size);
-  return ic;
+// streams (tx/rx)
+static inline void parse_stream(const YAML::Node& n, unsigned def_ring_size, Stream& s) {
+  if (!n || !n.IsMap()) return;
+  if (n["mode"])          s.mode = as_str(n["mode"], s.mode);
+  if (n["num_channels"])  s.num_channels = as_u32(n["num_channels"], s.num_channels);
+  if (n["allow_partial"]) s.allow_partial = as_bool(n["allow_partial"], s.allow_partial);
+  if (n["timeout_us"])    s.timeout_us = as_u32(n["timeout_us"], s.timeout_us);
+  if (n["busy_poll"])     s.busy_poll  = as_bool(n["busy_poll"], s.busy_poll);
+  if (n["rings"])         s.rings = parse_ring_list(n["rings"], def_ring_size);
 }
 
-static inline std::optional<RoleConfig> parse_role(const YAML::Node& rn, const DefaultConfig& def) {
-  if (!rn || !rn.IsMap()) return std::nullopt;
-  RoleConfig rc{};
+// interconnect (rings and optional dedicated pool info)
+static inline void parse_interconnect(const YAML::Node& n, unsigned def_ring_size, InterconnectConfig& ic) {
+  if (!n || !n.IsMap()) return;
+  if (n["rings"]) ic.rings = parse_ring_list(n["rings"], def_ring_size);
 
-  // pools (creator roles only)
-  rc.pools = parse_pool_list(rn["pools"]);
-
-  // tx_stream / rx_stream (override defaults if present)
-  if (const auto ntx = rn["tx_stream"]; ntx && ntx.IsMap())
-    rc.tx_stream = parse_stream(ntx, def.tx_stream, def.ring_size);
-  if (const auto nrx = rn["rx_stream"]; nrx && nrx.IsMap())
-    rc.rx_stream = parse_stream(nrx, def.rx_stream, def.ring_size);
-
-  // interconnect
-  if (const auto ni = rn["interconnect"]; ni && ni.IsMap())
-    rc.interconnect = parse_interconnect(ni, def.ring_size);
-
-  return rc;
+  if (n["pool_name"])       ic.pool_name       = as_str(n["pool_name"]);
+  if (n["pool_size"])       ic.pool_size       = as_u32(n["pool_size"], 0);
+  if (n["pool_elt_size"])   ic.pool_elt_size   = as_u32(n["pool_elt_size"], 0);
+  if (n["pool_cache_size"]) ic.pool_cache_size = as_u32(n["pool_cache_size"], 0);
 }
 
-// --------------- loader -------------------
-int load_from_yaml(const char* path, PrimaryConfig& cfg) {
+// role block (primary-ue, ue, primary-gnb, gnb)
+static inline void parse_role_block(const YAML::Node& n,
+                                    const DefaultConfig& defs,
+                                    RoleConfig& rc) {
+  if (!n || !n.IsMap()) return;
+
+  if (const auto n_tx = n["tx_stream"]) {
+    Stream s = defs.tx_stream;
+    parse_stream(n_tx, defs.ring_size, s);
+    rc.tx_stream = std::move(s);
+  }
+  if (const auto n_rx = n["rx_stream"]) {
+    Stream s = defs.rx_stream;
+    parse_stream(n_rx, defs.ring_size, s);
+    rc.rx_stream = std::move(s);
+  }
+  if (const auto n_pools = n["pools"]) {
+    rc.pools = parse_pool_list(n_pools, defs.mp_cache);
+  }
+  if (const auto n_ic = n["interconnect"]) {
+    InterconnectConfig ic{};
+    parse_interconnect(n_ic, defs.ring_size, ic);
+    // Only set if there’s at least something (rings or pool fields)
+    if (!ic.rings.empty() ||
+        ic.pool_name.has_value() || ic.pool_size.has_value() ||
+        ic.pool_elt_size.has_value() || ic.pool_cache_size.has_value()) {
+      rc.interconnect = std::move(ic);
+    }
+  }
+}
+
+// --------------------------- public API -------------------------------------
+
+int load_from_yaml(const char* path, PrimaryConfig& out) {
   try {
     YAML::Node root = YAML::LoadFile(path);
-    if (!root || !root.IsMap()) {
-      std::fprintf(stderr, "[cfg] YAML root not a map: %s\n", path ? path : "<null>");
-      return -1;
+
+    // ---- eal ---------------------------------------------------------------
+    if (const auto neal = root["eal"]; neal && neal.IsMap()) {
+      out.eal.file_prefix  = as_str(neal["file_prefix"],  out.eal.file_prefix);
+      out.eal.huge_dir     = as_str(neal["huge_dir"],     out.eal.huge_dir);
+      out.eal.socket_mem   = as_str(neal["socket_mem"],   out.eal.socket_mem);
+      out.eal.no_pci       = as_bool(neal["no_pci"],      out.eal.no_pci);
+      out.eal.iova         = as_str(neal["iova"],         out.eal.iova);
+
+      if (neal["lcores"])       out.eal.lcores       = as_str(neal["lcores"]);
+      if (neal["main_lcore"])   out.eal.main_lcore   = static_cast<int>(as_u32(neal["main_lcore"], 0));
+      if (neal["socket_limit"]) out.eal.socket_limit = as_str(neal["socket_limit"]);
     }
 
-    // ---- eal ----
-    if (const auto ne = root["eal"]; ne && ne.IsMap()) {
-      cfg.eal.file_prefix = as_str(ne["file_prefix"], cfg.eal.file_prefix);
-      cfg.eal.huge_dir    = as_str(ne["huge_dir"], cfg.eal.huge_dir);
-      cfg.eal.socket_mem  = as_str(ne["socket_mem"], cfg.eal.socket_mem);
-      cfg.eal.no_pci      = as_bool(ne["no_pci"], cfg.eal.no_pci);
-      cfg.eal.iova        = as_str(ne["iova"], cfg.eal.iova);
-
-      // optional knobs used by EalBootstrap
-      if (ne["lcores"])       cfg.eal.lcores       = as_str(ne["lcores"]);
-      if (ne["main_lcore"])   cfg.eal.main_lcore   = static_cast<int>(as_u32(ne["main_lcore"], 0));
-      if (ne["socket_limit"]) cfg.eal.socket_limit = as_str(ne["socket_limit"]);
-    }
-
-    // ---- defaults ----
-    if (const auto nd = root["defaults"]; nd && nd.IsMap()) {
-      if (const auto nrole = nd["role"]; nrole && nrole.IsScalar()) {
-        const auto r = nrole.as<std::string>();
-        cfg.defaults.role = role_from_string(r, cfg.defaults.role);
+    // ---- defaults ----------------------------------------------------------
+    if (const auto ndef = root["defaults"]; ndef && ndef.IsMap()) {
+      if (ndef["role"]) {
+        const auto r = as_str(ndef["role"]);
+        if (!r.empty()) out.defaults.role = role_from_string(r, out.defaults.role);
       }
-      cfg.defaults.nb_mbuf     = as_u32(nd["nb_mbuf"],     cfg.defaults.nb_mbuf);
-      cfg.defaults.mp_cache    = as_u32(nd["mp_cache"],    cfg.defaults.mp_cache);
-      cfg.defaults.ring_size   = as_u32(nd["ring_size"],   cfg.defaults.ring_size);
-      cfg.defaults.data_format = as_str(nd["data_format"], cfg.defaults.data_format);
+      if (ndef["nb_mbuf"])    out.defaults.nb_mbuf    = as_u32(ndef["nb_mbuf"],    out.defaults.nb_mbuf);
+      if (ndef["mp_cache"])   out.defaults.mp_cache   = as_u32(ndef["mp_cache"],   out.defaults.mp_cache);
+      if (ndef["ring_size"])  out.defaults.ring_size  = as_u32(ndef["ring_size"],  out.defaults.ring_size);
+      if (ndef["data_format"])out.defaults.data_format= as_str(ndef["data_format"],out.defaults.data_format);
 
-      // stream defaults
-      cfg.defaults.tx_stream = parse_stream(nd["tx_stream"], cfg.defaults.tx_stream, cfg.defaults.ring_size);
-      cfg.defaults.rx_stream = parse_stream(nd["rx_stream"], cfg.defaults.rx_stream, cfg.defaults.ring_size);
+      // defaults.tx_stream / rx_stream
+      parse_stream(ndef["tx_stream"], out.defaults.ring_size, out.defaults.tx_stream);
+      parse_stream(ndef["rx_stream"], out.defaults.ring_size, out.defaults.rx_stream);
 
-      // interconnect defaults
-      if (const auto ni = nd["interconnect"]; ni && ni.IsMap()) {
-        cfg.defaults.interconnect.rings = parse_ring_list(ni["rings"], cfg.defaults.ring_size);
-      }
+      // defaults.interconnect
+      parse_interconnect(ndef["interconnect"], out.defaults.ring_size, out.defaults.interconnect);
     }
 
-    // ---- per-role blocks (optional) ----
-    if (const auto n_pue = root["primary-ue"]; n_pue)  cfg.primary_ue  = parse_role(n_pue, cfg.defaults);
-    if (const auto n_ue  = root["ue"];         n_ue)   cfg.ue          = parse_role(n_ue,  cfg.defaults);
-
-    if (const auto n_pgnb = root["primary-gnb"]; n_pgnb) cfg.primary_gnb = parse_role(n_pgnb, cfg.defaults);
-    if (const auto n_gnb  = root["gnb"];         n_gnb)  cfg.gnb         = parse_role(n_gnb,  cfg.defaults);
+    // ---- per-role blocks ---------------------------------------------------
+    if (const auto n_pue = root["primary-ue"]; n_pue && n_pue.IsMap()) {
+      RoleConfig rc{};
+      parse_role_block(n_pue, out.defaults, rc);
+      out.primary_ue = std::move(rc);
+    }
+    if (const auto n_ue = root["ue"]; n_ue && n_ue.IsMap()) {
+      RoleConfig rc{};
+      parse_role_block(n_ue, out.defaults, rc);
+      out.ue = std::move(rc);
+    }
+    if (const auto n_pgnb = root["primary-gnb"]; n_pgnb && n_pgnb.IsMap()) {
+      RoleConfig rc{};
+      parse_role_block(n_pgnb, out.defaults, rc);
+      out.primary_gnb = std::move(rc);
+    }
+    if (const auto n_gnb = root["gnb"]; n_gnb && n_gnb.IsMap()) {
+      RoleConfig rc{};
+      parse_role_block(n_gnb, out.defaults, rc);
+      out.gnb = std::move(rc);
+    }
 
     return 0;
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "[cfg] exception while parsing %s: %s\n", path ? path : "<null>", e.what());
+    std::fprintf(stderr, "[config] YAML error: %s\n", e.what());
+    return -1;
+  } catch (...) {
+    std::fprintf(stderr, "[config] Unknown YAML error\n");
     return -2;
   }
 }
 
-}} // namespace flexsdr::conf
+} // namespace conf
+} // namespace flexsdr

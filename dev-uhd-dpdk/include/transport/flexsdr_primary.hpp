@@ -1,55 +1,60 @@
 #pragma once
+
 #include <string>
 #include <vector>
-#include <memory>
 
 #include <rte_mempool.h>
 #include <rte_ring.h>
 
-#include "conf/config_params.hpp"   // flexsdr::conf::PrimaryConfig
+#include "conf/config_params.hpp"
 
 namespace flexsdr {
 
 class FlexSDRPrimary {
 public:
   explicit FlexSDRPrimary(std::string yaml_path);
-
-  // Load YAML and create resources (pools + rings).
-  // Returns 0 on success; negative rte-style on failure.
   int init_resources();
 
-  // ---- Zero-copy access for test / app plumbing (avoid rte_*_lookup) ----
-  const std::vector<rte_ring*>&    tx_rings() const { return tx_rings_; }
-  const std::vector<rte_ring*>&    rx_rings() const { return rx_rings_; }
-  const std::vector<rte_mempool*>& pools()    const { return pools_;    }
+  const std::vector<rte_mempool*>& pools()       const { return pools_;       }
+  const std::vector<rte_ring*>&     tx_rings()    const { return tx_rings_;    }
+  const std::vector<rte_ring*>&     rx_rings()    const { return rx_rings_;    }
 
-  rte_ring*    ring_by_name(const std::string& name) const;
-  rte_mempool* pool_by_name(const std::string& name) const;
-
-  // For diagnostics
-  const conf::PrimaryConfig& cfg() const { return cfg_; }
+  // Interconnect (only valid when role is primary-gnb or primary-ue)
+  const std::vector<rte_ring*>&     ic_tx_rings() const { return ic_tx_rings_; }
+  const std::vector<rte_ring*>&     ic_rx_rings() const { return ic_rx_rings_; }
 
 private:
-  // Helpers
-  int  load_config_();
-  int  create_pools_();
-  int  create_rings_tx_();
-  int  create_rings_rx_();
-  static int create_ring_(const std::string& name, unsigned size, rte_ring** out);
-  static int lookup_ring_(const std::string& name, rte_ring** out);
-  static int lookup_pool_(const std::string& name, rte_mempool** out);
-  
+  // config
+  int load_config_();
 
-  // Create (or get-if-exists) a ring; returns 0 on success, -errno on fail
-  int  create_or_lookup_ring_(const std::string& name, unsigned size, rte_ring** out);
+  // local resources
+  int create_pools_();     // creator roles
+  int create_rings_tx_();  // creator roles
+  int create_rings_rx_();  // creator roles
 
-  // Data
-  std::string                 yaml_path_;
-  conf::PrimaryConfig         cfg_{};          // parsed configuration
+  // helpers
+  int create_ring_(const std::string& name, unsigned size, rte_ring** out);
+  int lookup_pools_();     // (if you reuse primary for lookup-only roles)
+  int lookup_rings_tx_();
+  int lookup_rings_rx_();
+  int lookup_ring_(const std::string& name, rte_ring** out);
 
-  std::vector<rte_mempool*>   pools_;
-  std::vector<rte_ring*>      tx_rings_;
-  std::vector<rte_ring*>      rx_rings_;
+  // interconnect (used ONLY on primaries)
+  int create_interconnect_(); // primary-gnb creates IC rings (+pool if configured)
+  int lookup_interconnect_(); // primary-ue looks up IC rings
+
+private:
+  std::string yaml_path_;
+  conf::PrimaryConfig cfg_;
+
+  // local IO
+  std::vector<rte_mempool*> pools_;
+  std::vector<rte_ring*>    tx_rings_;
+  std::vector<rte_ring*>    rx_rings_;
+
+  // interconnect (if applicable)
+  std::vector<rte_ring*>    ic_tx_rings_;
+  std::vector<rte_ring*>    ic_rx_rings_;
 };
 
 } // namespace flexsdr
