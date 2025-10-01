@@ -148,6 +148,8 @@ int FlexSDRPrimary::create_or_lookup_ring_(const std::string& name, unsigned siz
       }
     }
     if (!r) {
+      std::fprintf(stderr, "[ring] create failed: %s (size=%u) rte_errno=%d (%s)\n",
+             name.c_str(), size, rte_errno, rte_strerror(rte_errno));
       return -rte_errno ? -rte_errno : -1;
     }
     *out = r;

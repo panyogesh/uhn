@@ -1,197 +1,160 @@
 cmake_minimum_required(VERSION 3.18)
 project(dpdk_infra_sidecar CXX)
 
-# ---------- Repo root ----------
-get_filename_component(REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
-message(STATUS "Repo root (for sidecar): ${REPO_ROOT}")
-
+# ---------- Basics ----------
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
+set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+
+# ---------- Repo root (we're configuring from dev-uhd-dpdk/cmake/dpdk-infra) ----------
+get_filename_component(REPO_ROOT "${CMAKE_SOURCE_DIR}/../.." ABSOLUTE)
+message(STATUS "Repo root (for sidecar): ${REPO_ROOT}")
 
 # ---------- Dependencies ----------
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(DPDK REQUIRED libdpdk)   # change to 'dpdk' if your pkg-config name differs
+# Your system exports 'libdpdk' (public) and 'libdpdk-libs' (internal). Use libdpdk.
+pkg_check_modules(DPDK REQUIRED libdpdk)
+find_package(yaml-cpp REQUIRED)
+find_package(Threads REQUIRED)
 
-# yaml-cpp: support imported target or plain library
-set(YAMLCPP_LIB "")
-find_package(yaml-cpp QUIET)  # may define yaml-cpp::yaml-cpp
-if(TARGET yaml-cpp::yaml-cpp)
-  set(YAMLCPP_LIB yaml-cpp::yaml-cpp)
-else()
-  pkg_check_modules(YAMLCPP_PC QUIET yaml-cpp)
-  if(YAMLCPP_PC_FOUND)
-    include_directories(${YAMLCPP_PC_INCLUDE_DIRS})
-    link_directories(${YAMLCPP_PC_LIBRARY_DIRS})
-    set(YAMLCPP_LIB ${YAMLCPP_PC_LIBRARIES})
-  else()
-    find_library(YAMLCPP_LIB NAMES yaml-cpp)
-    if(NOT YAMLCPP_LIB)
-      message(FATAL_ERROR "yaml-cpp not found (no imported target, no pkg-config, no libyaml-cpp)")
-    endif()
-  endif()
-endif()
-
-find_package(Threads)
-
-# ---------- Compile flags ----------
-add_library(flexsdr_compile_options INTERFACE)
-target_compile_features(flexsdr_compile_options INTERFACE cxx_std_17)
-
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  target_compile_options(flexsdr_compile_options INTERFACE
-    -Wall -Wextra -Wpedantic -Wno-unused-parameter
-  )
-endif()
-
-# SIMD (fix for rte_memcpy SSSE3) + propagate DPDK pkg-config CFLAGS
-set(SIMD_FLAGS "")
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i.86")
-    list(APPEND SIMD_FLAGS -mssse3)   # or -march=native
-  endif()
-endif()
-if(DPDK_CFLAGS_OTHER)
-  target_compile_options(flexsdr_compile_options INTERFACE ${DPDK_CFLAGS_OTHER})
-endif()
-if(SIMD_FLAGS)
-  target_compile_options(flexsdr_compile_options INTERFACE ${SIMD_FLAGS})
-endif()
-
-# ---------- Includes & link dirs ----------
-set(FLEXSDR_INC_DIR "${REPO_ROOT}/include")
-include_directories(${FLEXSDR_INC_DIR})
+# DPDK includes/libs from pkg-config
 include_directories(${DPDK_INCLUDE_DIRS})
 link_directories(${DPDK_LIBRARY_DIRS})
 
-# ---------- Robust file finder ----------
-function(fsdr_find_one OUT_VAR)
-  set(options)
-  set(oneValueArgs NAME)
-  cmake_parse_arguments(FS "${options}" "${oneValueArgs}" "" ${ARGN})
-  if(NOT FS_NAME)
-    message(FATAL_ERROR "fsdr_find_one(NAME <filename>) requires NAME")
+# Sanitize libs: pkg-config may inject -Wl,--as-needed; drop it for our test target
+set(DPDK_LIBS_SANITIZED ${DPDK_LIBRARIES})
+list(FILTER DPDK_LIBS_SANITIZED EXCLUDE REGEX "^-Wl,--as-needed$")
+
+message(STATUS "DPDK include dirs: ${DPDK_INCLUDE_DIRS}")
+message(STATUS "DPDK library dirs: ${DPDK_LIBRARY_DIRS}")
+message(STATUS "DPDK libs (raw)  : ${DPDK_LIBRARIES}")
+
+# ---------- ISA helper to satisfy DPDK intrinsics on GCC/Clang ----------
+include(CheckCXXCompilerFlag)
+function(apply_dpdk_isa target)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    return()
   endif()
-
-  set(_cands "${REPO_ROOT}/${FS_NAME}")
-
-  file(GLOB _d1 "${REPO_ROOT}/*/${FS_NAME}")
-  file(GLOB _d2 "${REPO_ROOT}/*/*/${FS_NAME}")
-  file(GLOB _d3 "${REPO_ROOT}/*/*/*/${FS_NAME}")
-  file(GLOB _d4 "${REPO_ROOT}/*/*/*/*/${FS_NAME}")
-  file(GLOB _d5 "${REPO_ROOT}/*/*/*/*/*/${FS_NAME}")
-  file(GLOB _d6 "${REPO_ROOT}/*/*/*/*/*/*/${FS_NAME}")
-
-  list(APPEND _cands ${_d1} ${_d2} ${_d3} ${_d4} ${_d5} ${_d6})
-
-  set(_hit "")
-  foreach(path IN LISTS _cands)
-    if(EXISTS "${path}")
-      set(_hit "${path}")
-      break()
+  if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i.86")
+    return()
+  endif()
+  set(_isa "")
+  check_cxx_compiler_flag("-march=x86-64-v2" HAS_X86V2)
+  if(HAS_X86V2)
+    set(_isa "-march=x86-64-v2")
+  else()
+    check_cxx_compiler_flag("-mssse3" HAS_SSSE3)
+    if(HAS_SSSE3)
+      set(_isa "-mssse3")
     endif()
-  endforeach()
-
-  set(${OUT_VAR} "${_hit}" PARENT_SCOPE)
+  endif()
+  if(_isa)
+    target_compile_options(${target} PRIVATE ${_isa})
+    message(STATUS "Applied ${_isa} to ${target}")
+  endif()
 endfunction()
 
-# ---------- Locate sources ----------
-fsdr_find_one(CONF_CPP NAME "config_params.cpp")
-fsdr_find_one(EAL_CPP NAME "eal_bootstrap.cpp")
-fsdr_find_one(PRIMARY_CPP NAME "flexsdr_primary.cpp")
-if(NOT PRIMARY_CPP)
-  fsdr_find_one(PRIMARY_CPP NAME "flxesdr_primary.cpp")  # tolerate earlier typo
-endif()
-fsdr_find_one(SECONDARY_CPP NAME "flexsdr_secondary.cpp")
+# ---------- Source files (exact per your tree) ----------
+set(CONF_CPP      "${REPO_ROOT}/src/conf/config_params.cpp")
+set(EAL_CPP       "${REPO_ROOT}/src/transport/eal_bootstrap.cpp")
+set(PRIMARY_CPP   "${REPO_ROOT}/src/transport/flexsdr_primary.cpp")
+set(SECONDARY_CPP "${REPO_ROOT}/src/transport/flexsdr_secondary.cpp")
 
-if(NOT CONF_CPP)
-  message(FATAL_ERROR "config_params.cpp not found under ${REPO_ROOT}")
+# Per-file existence checks (clear error messages)
+if(NOT EXISTS "${CONF_CPP}")
+  message(FATAL_ERROR "Missing required source: ${CONF_CPP}")
 endif()
-if(NOT EAL_CPP)
-  message(FATAL_ERROR "eal_bootstrap.cpp not found under ${REPO_ROOT}")
+if(NOT EXISTS "${EAL_CPP}")
+  message(FATAL_ERROR "Missing required source: ${EAL_CPP}")
 endif()
-if(NOT PRIMARY_CPP)
-  message(FATAL_ERROR "flexsdr_primary.cpp (or flxesdr_primary.cpp) not found under ${REPO_ROOT}")
+if(NOT EXISTS "${PRIMARY_CPP}")
+  message(FATAL_ERROR "Missing required source: ${PRIMARY_CPP}")
 endif()
-if(NOT SECONDARY_CPP)
-  message(FATAL_ERROR "flexsdr_secondary.cpp not found under ${REPO_ROOT}")
+if(NOT EXISTS "${SECONDARY_CPP}")
+  message(FATAL_ERROR "Missing required source: ${SECONDARY_CPP}")
 endif()
 
-# Test file: repo-level or sidecar-local
-set(TEST_INFRA_CPP "${REPO_ROOT}/tests/test_dpdk_infra.cpp")
+# Test source: if repo has tests/test_dpdk_infra.cpp use it, else use sidecar copy
+set(TEST_INFRA_CPP "${REPO_ROOT}/test/test_dpdk_infra.cpp")
 if(NOT EXISTS "${TEST_INFRA_CPP}")
-  set(TEST_INFRA_CPP "${CMAKE_CURRENT_LIST_DIR}/test_dpdk_infra.cpp")
+  set(TEST_INFRA_CPP "${CMAKE_SOURCE_DIR}/test_dpdk_infra.cpp")
 endif()
-
 set(BUILD_TEST_INFRA OFF)
 if(EXISTS "${TEST_INFRA_CPP}")
   set(BUILD_TEST_INFRA ON)
 endif()
 
 message(STATUS "Found sources:")
-message(STATUS "  config_params.cpp   : ${CONF_CPP}")
-message(STATUS "  eal_bootstrap.cpp   : ${EAL_CPP}")
-message(STATUS "  primary impl        : ${PRIMARY_CPP}")
-message(STATUS "  secondary impl      : ${SECONDARY_CPP}")
-message(STATUS "  test_dpdk_infra.cpp : ${TEST_INFRA_CPP} (build=${BUILD_TEST_INFRA})")
+message(STATUS "  config_params.cpp : ${CONF_CPP}")
+message(STATUS "  eal_bootstrap.cpp : ${EAL_CPP}")
+message(STATUS "  primary           : ${PRIMARY_CPP}")
+message(STATUS "  secondary         : ${SECONDARY_CPP}")
+message(STATUS "  test_dpdk_infra   : ${TEST_INFRA_CPP} (build=${BUILD_TEST_INFRA})")
+
+# ---------- Public include root ----------
+set(FLEXSDR_INC "${REPO_ROOT}/include")
 
 # ---------- Libraries ----------
 add_library(flexsdr_conf STATIC "${CONF_CPP}")
-target_link_libraries(flexsdr_conf PUBLIC ${YAMLCPP_LIB} flexsdr_compile_options)
-target_include_directories(flexsdr_conf PUBLIC ${FLEXSDR_INC_DIR})
+target_include_directories(flexsdr_conf PUBLIC "${FLEXSDR_INC}")
+target_link_libraries(flexsdr_conf PUBLIC yaml-cpp Threads::Threads)
+apply_dpdk_isa(flexsdr_conf)
 
 add_library(flexsdr_eal STATIC "${EAL_CPP}")
-target_link_libraries(flexsdr_eal PUBLIC ${DPDK_LIBRARIES} flexsdr_compile_options)
-target_include_directories(flexsdr_eal PUBLIC ${FLEXSDR_INC_DIR} ${DPDK_INCLUDE_DIRS})
+target_include_directories(flexsdr_eal PUBLIC "${FLEXSDR_INC}" ${DPDK_INCLUDE_DIRS})
+target_link_libraries(flexsdr_eal PUBLIC ${DPDK_LIBS_SANITIZED} Threads::Threads)
+apply_dpdk_isa(flexsdr_eal)
 
 add_library(flexsdr_primary STATIC "${PRIMARY_CPP}")
-target_link_libraries(flexsdr_primary
-  PUBLIC flexsdr_conf flexsdr_eal ${DPDK_LIBRARIES} flexsdr_compile_options
-)
-target_include_directories(flexsdr_primary PUBLIC ${FLEXSDR_INC_DIR} ${DPDK_INCLUDE_DIRS})
+target_include_directories(flexsdr_primary PUBLIC "${FLEXSDR_INC}" ${DPDK_INCLUDE_DIRS})
+target_link_libraries(flexsdr_primary PUBLIC flexsdr_conf flexsdr_eal ${DPDK_LIBS_SANITIZED} Threads::Threads)
+apply_dpdk_isa(flexsdr_primary)
 
 add_library(flexsdr_secondary STATIC "${SECONDARY_CPP}")
-target_link_libraries(flexsdr_secondary
-  PUBLIC flexsdr_conf flexsdr_eal ${DPDK_LIBRARIES} flexsdr_compile_options
-)
-target_include_directories(flexsdr_secondary PUBLIC ${FLEXSDR_INC_DIR} ${DPDK_INCLUDE_DIRS})
+target_include_directories(flexsdr_secondary PUBLIC "${FLEXSDR_INC}" ${DPDK_INCLUDE_DIRS})
+target_link_libraries(flexsdr_secondary PUBLIC flexsdr_conf flexsdr_eal ${DPDK_LIBS_SANITIZED} Threads::Threads)
+apply_dpdk_isa(flexsdr_secondary)
 
-# ---------- Test executable ----------
 # ---------- Test executable ----------
 if(BUILD_TEST_INFRA)
   add_executable(test_dpdk_infra "${TEST_INFRA_CPP}")
-  target_include_directories(test_dpdk_infra PRIVATE ${FLEXSDR_INC_DIR} ${DPDK_INCLUDE_DIRS})
+  target_include_directories(test_dpdk_infra PRIVATE "${FLEXSDR_INC}" ${DPDK_INCLUDE_DIRS})
 
-  # Prefer shared libdpdk if available
-  find_library(DPDK_SHARED dpdk)
-  if (DPDK_SHARED)
-    message(STATUS "Linking test_dpdk_infra against shared ${DPDK_SHARED}")
-    target_link_libraries(test_dpdk_infra
-      PRIVATE flexsdr_primary flexsdr_secondary flexsdr_conf flexsdr_eal
-              ${YAMLCPP_LIB} ${DPDK_SHARED})
-  else()
-    message(STATUS "Shared libdpdk not found; falling back to static libs list")
-    # Keep constructors (tailqs) when falling back to static list
-    target_link_options(test_dpdk_infra PRIVATE -Wl,--no-as-needed -Wl,--whole-archive)
-    target_link_libraries(test_dpdk_infra
-      PRIVATE flexsdr_primary flexsdr_secondary flexsdr_conf flexsdr_eal
-              ${YAMLCPP_LIB} ${DPDK_LIBRARIES})
-    target_link_options(test_dpdk_infra PRIVATE -Wl,--no-whole-archive)
-  endif()
+  # Ensure DPDK DSOs aren’t dropped (so constructors run & ring tailq is registered)
+  target_link_options(test_dpdk_infra PRIVATE -Wl,--no-as-needed)
 
-  if(Threads_FOUND)
-    target_link_libraries(test_dpdk_infra PRIVATE Threads::Threads)
-  endif()
-  find_library(LIBDL dl)   
-    if(LIBDL)
-      target_link_libraries(test_dpdk_infra PRIVATE ${LIBDL})
-    endif()
-  find_library(LIBNUMA numa)
-    if(LIBNUMA)
-      target_link_libraries(test_dpdk_infra PRIVATE ${LIBNUMA})
-    endif()
+  target_link_libraries(test_dpdk_infra
+    PRIVATE
+      flexsdr_eal
+      flexsdr_primary
+      flexsdr_secondary
+      flexsdr_conf
+      yaml-cpp
+      ${DPDK_LIBS_SANITIZED}
+      Threads::Threads
+  )
+
+  # Optional: restore as-needed after DPDK linking
+  target_link_options(test_dpdk_infra PRIVATE -Wl,--as-needed)
+
+  # Let the loader find librte_*.so without env tweaks
+  set_target_properties(test_dpdk_infra PROPERTIES
+    BUILD_RPATH   "${DPDK_LIBRARY_DIRS}"
+    INSTALL_RPATH "${DPDK_LIBRARY_DIRS}"
+  )
+
+  apply_dpdk_isa(test_dpdk_infra)
 endif()
 
-message(STATUS "DPDK include dirs: ${DPDK_INCLUDE_DIRS}")
-message(STATUS "DPDK libraries   : ${DPDK_LIBRARIES}")
+# ---------- Warnings ----------
+foreach(tgt IN ITEMS flexsdr_conf flexsdr_eal flexsdr_primary flexsdr_secondary test_dpdk_infra)
+  if(TARGET ${tgt})
+    target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wno-pedantic -Wno-unused-parameter)
+  endif()
+endforeach()
+
 message(STATUS "Sidecar build type: ${CMAKE_BUILD_TYPE}")
