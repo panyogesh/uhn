@@ -81,18 +81,15 @@ int FlexSDRSecondary::lookup_pools_() {
   }
   return 0;
 }
-
 static inline const std::vector<RingSpec>&
 collect_tx_rings_(const PrimaryConfig& cfg) {
-  if (cfg.primary_ue && !cfg.primary_ue->rings.tx.empty())
-    return cfg.primary_ue->rings.tx;
+  // Source of truth: defaults.tx_stream.rings
   return cfg.defaults.tx_stream.rings;
 }
 
 static inline const std::vector<RingSpec>&
 collect_rx_rings_(const PrimaryConfig& cfg) {
-  if (cfg.primary_ue && !cfg.primary_ue->rings.rx.empty())
-    return cfg.primary_ue->rings.rx;
+  // Source of truth: defaults.rx_stream.rings
   return cfg.defaults.rx_stream.rings;
 }
 
