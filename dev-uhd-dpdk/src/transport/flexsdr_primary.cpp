@@ -105,9 +105,6 @@ int FlexSDRPrimary::init_resources() {
   if (int rc = create_rings_tx_(); rc) return rc;
   if (int rc = create_rings_rx_(); rc) return rc;
 
-  // UE side: interconnect rings are created by gNB primary → we only LOOKUP here if present.
-  (void)lookup_interconnect_();
-
   std::fprintf(stderr, "[primary] resources ready\n");
   return 0;
 }
