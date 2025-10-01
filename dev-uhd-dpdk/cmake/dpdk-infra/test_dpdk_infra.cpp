@@ -17,28 +17,10 @@
 #include "transport/flexsdr_primary.hpp"
 #include "transport/flexsdr_secondary.hpp"
 
-// ---- DPDK version helpers (builds on 21.x .. 24.x) -----------------------
-#ifndef RTE_VERSION_NUM
-#define RTE_VERSION_NUM(a,b,c,d) ((((a)*100 + (b))*100 + (c))*100 + (d))
-#endif
-#ifndef RTE_VER_YEAR
-#define RTE_VER_YEAR 24
-#define RTE_VER_MONTH 11
-#endif
-#define RTE_AT_LEAST(YY,MM) \
-  ( RTE_VERSION_NUM(RTE_VER_YEAR, RTE_VER_MONTH, 0, 0) >= RTE_VERSION_NUM((YY),(MM),0,0) )
-
-// ---- tiny helpers used below ---------------------------------------------
-static inline const char* mempool_name(const rte_mempool* mp) {
-#if RTE_AT_LEAST(24,11)
-  return rte_mempool_get_name(mp);
-#else
-  return mp ? mp->name : "<null>";
-#endif
+// ---- Minimal helpers used below (avoid version-specific name APIs) -------
+static inline unsigned ring_size(const rte_ring* r) {
+  return r ? rte_ring_get_size(r) : 0U;
 }
-
-static inline const char* ring_name(const rte_ring* r)   { return r ? rte_ring_get_name(r) : "<null>"; }
-static inline unsigned     ring_size(const rte_ring* r)  { return r ? rte_ring_get_size(r)  : 0U; }
 
 // ---------- crash handler ----------
 static void crash_handler(int sig) {
@@ -66,16 +48,15 @@ static void dump_primary(const flexsdr::FlexSDRPrimary& app) {
                app.pools().size(), app.tx_rings().size(), app.rx_rings().size());
 
   for (auto* mp : app.pools()) {
-    std::fprintf(stderr, "  [pool] %s\n", mempool_name(mp));
+    std::fprintf(stderr, "  [pool] %p\n", (void*)mp);
   }
 
   for (auto* r : app.tx_rings()) {
-    if (!r) continue;
-    std::fprintf(stderr, "  [tx]   %s (size=%u)\n", ring_name(r), ring_size(r));
+    std::fprintf(stderr, "  [tx]   %p (size=%u)\n", (void*)r, ring_size(r));
   }
+
   for (auto* r : app.rx_rings()) {
-    if (!r) continue;
-     std::fprintf(stderr, "  [rx]   %s (size=%u)\n", ring_name(r), ring_size(r));
+     std::fprintf(stderr, "  [rx]   %p (size=%u)\n", (void*)r, ring_size(r));
   }
 }
 
@@ -84,13 +65,13 @@ static void dump_secondary(const flexsdr::FlexSDRSecondary& app) {
                app.pools().size(), app.tx_rings().size(), app.rx_rings().size());
 
   for (auto* mp : app.pools()) {
-     std::fprintf(stderr, "  [pool] %s\n", mempool_name(mp));
+     std::fprintf(stderr, "  [pool] %p\n", (void*)mp);
   }
   for (auto* r : app.tx_rings()) {
-    std::fprintf(stderr, "  [tx]   %s (size=%u)\n", ring_name(r), ring_size(r));
+     std::fprintf(stderr, "  [tx]   %p (size=%u)\n", (void*)r, ring_size(r));
   }
   for (auto* r : app.rx_rings()) {
-    std::fprintf(stderr, "  [rx]   %s (size=%u)\n", ring_name(r), ring_size(r));
+    std::fprintf(stderr, "  [rx]   %p (size=%u)\n", (void*)r, ring_size(r));
   }
 }
 
