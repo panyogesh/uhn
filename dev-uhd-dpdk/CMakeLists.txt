@@ -147,7 +147,7 @@ set(GRPC_CLIENT_INC       ${CMAKE_SOURCE_DIR}/src/device/grpc_client)
 
 # ---- Libraries ------------------------------------------------------------
 add_library(flexsdr_cfg
-  src/conf/config_parms.cpp
+  src/conf/config_params.cpp
 )
 target_include_directories(flexsdr_cfg PUBLIC
   ${PROJ_INCLUDE_DIR} ${PROJ_INCLUDE_CONF} ${PROJ_INCLUDE_TRAN} ${PROJ_INCLUDE_DEV}
@@ -213,54 +213,24 @@ target_link_libraries(flexsdr_device PUBLIC
   Threads::Threads
 )
 
-add_library(flexsdr_workers
-  src/runtime/affinity.cpp
-  src/workers/rx_worker.cpp
-  src/workers/tx_worker.cpp
-)
-target_include_directories(flexsdr_workers PUBLIC
-  ${PROJ_INCLUDE_RUNTIME} ${PROJ_INCLUDE_WORKERS} ${PROJ_INCLUDE_DIR}
-  ${PROJ_INCLUDE_DEV} ${PROJ_INCLUDE_TRAN} ${PROJ_INCLUDE_CONF}
-)
-target_link_libraries(flexsdr_workers PRIVATE PkgConfig::libdpdk UHD::UHD)
-
 # ---- Executables ----------------------------------------------------------
-add_executable(test_dpdk_infra test/test_dpdk_infra.cpp)
-target_include_directories(test_dpdk_infra PRIVATE
-  ${PROJ_INCLUDE_DIR} ${PROJ_INCLUDE_CONF} ${PROJ_INCLUDE_TRAN} ${PROJ_INCLUDE_DEV}
-)
-target_link_libraries(test_dpdk_infra PRIVATE
-  flexsdr_eal flexsdr_primary flexsdr_secondary flexsdr_cfg
-  yaml-cpp PkgConfig::libdpdk Threads::Threads
-)
-
 add_executable(test_flexsdr_factory test/test_flexsdr_factory.cpp)
 target_include_directories(test_flexsdr_factory PRIVATE
   ${PROJ_INCLUDE_DIR} ${PROJ_INCLUDE_DEV}
-  ${PROJ_INCLUDE_RUNTIME} ${PROJ_INCLUDE_WORKERS}
   ${GENERATED_PROTO_DIR}
 )
 target_link_libraries(test_flexsdr_factory PRIVATE
   flexsdr_device
   flexsdr_eal
   flexsdr_secondary
-  flexsdr_workers
   UHD::UHD
   Threads::Threads
-)
-
-add_executable(test_dpdk_primary_only test/test_dpdk_primary_only.cpp)
-target_include_directories(test_dpdk_primary_only PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(test_dpdk_primary_only PRIVATE
-  flexsdr_primary flexsdr_eal flexsdr_secondary flexsdr_cfg
-  yaml-cpp PkgConfig::libdpdk Threads::Threads
 )
 
 # ---- Warnings & (optional) ISA tweaks -------------------------------------
 foreach(tgt IN ITEMS
   flexsdr_cfg flexsdr_eal flexsdr_primary flexsdr_secondary
-  flexsdr_grpc flexsdr_device flexsdr_workers
-  test_dpdk_infra test_flexsdr_factory test_dpdk_primary_only)
+  flexsdr_grpc flexsdr_device
+  test_flexsdr_factory)
   target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wno-pedantic)
 endforeach()
-

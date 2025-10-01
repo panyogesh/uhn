@@ -128,13 +128,19 @@ flexsdr_device::get_rx_stream(const uhd::stream_args_t& args)
   // channels from args (default 1)
   std::size_t num_chans = args.channels.empty() ? 1 : args.channels.size();
 
-  // VRT header skip and schedule (your requirement)
-  const std::size_t vrt_hdr_bytes = 32;  // adjust if your VRT header is 28B
-  const unsigned    pkts_per_chan = 8;
-  const unsigned    burst         = 32;
+  // Create options for new API
+  flexsdr_rx_streamer::options opts;
+  opts.ring = rx_ring;
+  opts.num_channels = num_chans;
+  opts.cpu_fmt = "sc16";
+  opts.otw_fmt = "sc16";
+  opts.max_samps = 32768;
+  opts.burst_size = 32;
+  opts.parse_tsf = false;
+  opts.vrt_hdr_bytes = 32;
+  opts.qid = 0;
 
-  return std::make_shared<flexsdr_rx_streamer>(
-      rx_ring, num_chans, _mcr, vrt_hdr_bytes, pkts_per_chan, burst);
+  return flexsdr_rx_streamer::make(opts);
 }
 
 uhd::tx_streamer::sptr

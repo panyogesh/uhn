@@ -1,163 +1,202 @@
 // src/device/flexsdr_rx_streamer.cpp
 #include "device/flexsdr_rx_streamer.hpp"
 
-extern "C" {
-#include <rte_ring.h>
-#include <rte_mbuf.h>
-}
-
-#include <algorithm>
+#include <cstdio>
 #include <cstring>
-#include <chrono>
-#include <cstdint>
-#include <arpa/inet.h> // ntohl
-#include <endian.h>
+#include <algorithm>
+
+#include <rte_mbuf.h>
+#include <rte_ring.h>
+#include <rte_errno.h>
 
 namespace flexsdr {
 
-flexsdr_rx_streamer::flexsdr_rx_streamer(rte_ring* ring,
-                                         std::size_t num_chans,
-                                         double tick_rate_hz,
-                                         std::size_t vrt_hdr_bytes,
-                                         unsigned packets_per_chan,
-                                         unsigned burst,
-                                         std::size_t tsf_offset)
-: ring_(ring)
-, num_chans_(num_chans ? num_chans : 1)
-, tick_rate_(tick_rate_hz > 0 ? tick_rate_hz : 30.72e6)
-, vrt_hdr_bytes_(vrt_hdr_bytes ? vrt_hdr_bytes : 32)
-, pkts_per_chan_(packets_per_chan ? packets_per_chan : 8)
-, burst_(burst ? burst : 32)
-, tsf_offset_(tsf_offset)
-{}
-
-size_t flexsdr_rx_streamer::get_num_channels() const { return num_chans_; }
-// pick a conservative “hint”; UHD will pass nsamps_per_buff anyway
-size_t flexsdr_rx_streamer::get_max_num_samps() const { return 1024; }
+flexsdr_rx_streamer::flexsdr_rx_streamer(const options& opt)
+  : opt_(opt)
+{
+  if (!opt_.ring) {
+    std::fprintf(stderr, "[flexsdr_rx_streamer] WARNING: ring is nullptr\n");
+  }
+  
+  std::fprintf(stderr, "[flexsdr_rx_streamer] Created: %zu channels, max_samps=%zu, burst=%u\n",
+               opt_.num_channels, opt_.max_samps, opt_.burst_size);
+}
 
 void flexsdr_rx_streamer::issue_stream_cmd(const uhd::stream_cmd_t& cmd) {
   switch (cmd.stream_mode) {
     case uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS:
-    case uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE:
-      running_ = true; break;
+      running_.store(true);
+      std::fprintf(stderr, "[flexsdr_rx_streamer] Stream started (continuous)\n");
+      break;
+      
     case uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS:
-      running_ = false; break;
-    default: break;
+      running_.store(false);
+      std::fprintf(stderr, "[flexsdr_rx_streamer] Stream stopped\n");
+      break;
+      
+    case uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_DONE:
+      running_.store(true);
+      std::fprintf(stderr, "[flexsdr_rx_streamer] Stream started (num_samps=%zu)\n",
+                   cmd.num_samps);
+      break;
+      
+    case uhd::stream_cmd_t::STREAM_MODE_NUM_SAMPS_AND_MORE:
+      running_.store(true);
+      std::fprintf(stderr, "[flexsdr_rx_streamer] Stream started (num_samps=%zu, more)\n",
+                   cmd.num_samps);
+      break;
+      
+    default:
+      std::fprintf(stderr, "[flexsdr_rx_streamer] WARNING: Unknown stream mode\n");
+      break;
   }
 }
 
-// Minimal helper: convert VRT TSF (if present as 64-bit after header) to UHD time_spec
-static inline void tsf_to_time(double tick_rate, uint64_t tsf, uhd::time_spec_t& ts) {
-  // Treat TSF as sample ticks (UHD’s common use); adjust if you encode different units.
-  const double secs = double(tsf) / tick_rate;
-  ts = uhd::time_spec_t(secs);
-}
-
-size_t flexsdr_rx_streamer::recv(const buffs_type& buffs,
-                                 const size_t nsamps_per_buff,
-                                 uhd::rx_metadata_t& md,
-                                 const double timeout,
-                                 const bool one_packet)
+size_t flexsdr_rx_streamer::recv(
+    const buffs_type& buffs,
+    const size_t nsamps_per_buff,
+    uhd::rx_metadata_t& metadata,
+    const double timeout,
+    const bool one_packet)
 {
-  md = uhd::rx_metadata_t{};
-  if (!running_ || !ring_ || nsamps_per_buff == 0 || buffs.size() < num_chans_) {
-    md.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
+  (void)timeout;  // TODO: Implement timeout
+  (void)one_packet;
+  
+  if (!opt_.ring) {
+    metadata.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
     return 0;
   }
-
-  constexpr unsigned MAX_BURST = 64;
-  void* objs[MAX_BURST];
-  const unsigned want = std::min<unsigned>(burst_, MAX_BURST);
-
-  auto deadline = std::chrono::steady_clock::now() +
-                  std::chrono::duration<double>(timeout);
-
-  unsigned got = 0;
-  while (got == 0) {
-    got = rte_ring_dequeue_burst(ring_, objs, want, nullptr);
-    if (got == 0) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        md.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
-        return 0;
-      }
-      rte_pause();
+  
+  if (!running_.load()) {
+    metadata.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
+    return 0;
+  }
+  
+  // Dequeue burst of mbufs from DPDK ring
+  void* mbuf_ptrs[opt_.burst_size];
+  unsigned n_dequeued = rte_ring_dequeue_burst(
+      opt_.ring,
+      mbuf_ptrs,
+      opt_.burst_size,
+      nullptr);
+  
+  if (n_dequeued == 0) {
+    // No data available
+    underruns_++;
+    metadata.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
+    return 0;
+  }
+  
+  bursts_cons_++;
+  
+  // Convert buffs_type to vector<void*>
+  std::vector<void*> ch_buffs;
+  ch_buffs.reserve(buffs.size());
+  for (size_t i = 0; i < buffs.size(); i++) {
+    ch_buffs.push_back(buffs[i]);
+  }
+  
+  // Use custom unpacker if provided, otherwise default
+  size_t samples_written;
+  if (opt_.iq_unpack) {
+    // Custom SIMD unpacker
+    samples_written = opt_.iq_unpack(
+        ch_buffs,
+        nsamps_per_buff,
+        reinterpret_cast<rte_mbuf**>(mbuf_ptrs),
+        n_dequeued,
+        metadata);
+  } else {
+    // Default unpacker
+    samples_written = default_unpack_sc16_interleaved_(
+        ch_buffs,
+        nsamps_per_buff,
+        reinterpret_cast<rte_mbuf**>(mbuf_ptrs),
+        n_dequeued,
+        metadata);
+  }
+  
+  // Free mbufs back to pool
+  for (unsigned i = 0; i < n_dequeued; i++) {
+    if (mbuf_ptrs[i]) {
+      rte_pktmbuf_free(static_cast<rte_mbuf*>(mbuf_ptrs[i]));
     }
   }
+  
+  samples_out_ += samples_written;
+  
+  // Set metadata
+  metadata.error_code = uhd::rx_metadata_t::ERROR_CODE_NONE;
+  metadata.has_time_spec = opt_.parse_tsf;
+  
+  return samples_written;
+}
 
-  // Per-channel write counters (critical fix)
-  std::vector<size_t> wr(num_chans_, 0);
-  bool   eob_seen = false;
-  bool   sob_seen = false;
-
-  for (unsigned i = 0; i < got; ++i) {
-    rte_mbuf* m = static_cast<rte_mbuf*>(objs[i]);
-
-    const uint8_t* base = (const uint8_t*)rte_pktmbuf_mtod(m, const void*);
-    const size_t   pkt_bytes = size_t(rte_pktmbuf_data_len(m));
-
-    // Channel group accounting (8 packets per channel)
-    const uint64_t pkt_idx = pkt_counter_++;
-    const std::size_t chan = std::size_t((pkt_idx / pkts_per_chan_) % num_chans_);
-    const bool group_start = (pkt_idx % pkts_per_chan_) == 0;
-    const bool group_end   = (pkt_idx % pkts_per_chan_) == (pkts_per_chan_ - 1);
-
-    // Stamp time at group start (TSF always present by your spec)
-    if (group_start && (tsf_offset_ + 8 <= pkt_bytes)) {
-      uint64_t tsf_be;
-      std::memcpy(&tsf_be, base + tsf_offset_, sizeof(tsf_be));
-      const uint64_t tsf = be64toh(tsf_be);
-      md.has_time_spec = true;
-      tsf_to_time(tick_rate_, tsf, md.time_spec);
-      sob_seen = true;
-    }
-
-    // Payload after VRT header
-    const size_t payload_off = vrt_hdr_bytes_;
-    if (payload_off >= pkt_bytes || chan >= buffs.size()) {
-      rte_pktmbuf_free(m);
+size_t flexsdr_rx_streamer::default_unpack_sc16_interleaved_(
+    const std::vector<void*>& ch_buffs,
+    size_t nsamps_target,
+    rte_mbuf* const* mbufs,
+    uint16_t count,
+    uhd::rx_metadata_t& md)
+{
+  const size_t num_ch = get_num_channels();
+  size_t total_samples = 0;
+  
+  // Extract timestamp from first packet if enabled
+  if (opt_.parse_tsf && count > 0 && mbufs[0]) {
+    uint64_t tsf = extract_tsf_(mbufs[0]);
+    md.time_spec = uhd::time_spec_t::from_ticks(tsf, 1.0); // Placeholder tick rate
+    md.has_time_spec = true;
+  } else {
+    md.has_time_spec = false;
+  }
+  
+  // Process each mbuf
+  for (uint16_t i = 0; i < count && total_samples < nsamps_target; i++) {
+    rte_mbuf* m = mbufs[i];
+    
+    if (!m || !m->buf_addr) {
+      mbuf_errors_++;
       continue;
     }
-    const uint8_t* iq = base + payload_off;
-    const size_t   payload_bytes = pkt_bytes - payload_off;
-    const size_t   samps_in_pkt  = payload_bytes / (sizeof(int16_t) * 2);
-    if (samps_in_pkt == 0) { rte_pktmbuf_free(m); continue; }
-
-    // Channel-local remaining room for this call
-    size_t remain_ch = nsamps_per_buff - wr[chan];
-    size_t take      = std::min(remain_ch, samps_in_pkt);
-    if (take > 0) {
-      auto* dst = static_cast<uint8_t*>(buffs[chan]);
-      const size_t bytes = take * sizeof(int16_t) * 2;
-      std::memcpy(dst + wr[chan] * sizeof(int16_t) * 2, iq, bytes);
-      wr[chan] += take;
+    
+    // Skip VRT header to get to IQ data
+    const int16_t* src = rte_pktmbuf_mtod_offset(m, int16_t*, opt_.vrt_hdr_bytes);
+    const size_t payload_bytes = m->data_len - opt_.vrt_hdr_bytes;
+    
+    // Calculate samples in this packet
+    // Format: interleaved [CH0_I, CH0_Q, CH1_I, CH1_Q, ...]
+    const size_t values_per_sample = 2;  // I + Q
+    const size_t total_values = payload_bytes / sizeof(int16_t);
+    const size_t samps_in_pkt = total_values / (num_ch * values_per_sample);
+    
+    // Copy samples to output buffers (deinterleave if multi-channel)
+    for (size_t s = 0; s < samps_in_pkt && total_samples < nsamps_target; s++) {
+      for (size_t ch = 0; ch < num_ch; ch++) {
+        int16_t* out = static_cast<int16_t*>(ch_buffs[ch]);
+        const size_t src_idx = s * num_ch * values_per_sample + ch * values_per_sample;
+        const size_t dst_idx = total_samples * values_per_sample;
+        
+        // Copy I and Q
+        out[dst_idx] = src[src_idx];         // I
+        out[dst_idx + 1] = src[src_idx + 1]; // Q
+      }
+      total_samples++;
     }
-
-    eob_seen |= group_end;
-    rte_pktmbuf_free(m);
-
-    if (one_packet) break;
-
-    // Early exit if all channels filled their quota
-    bool all_full = true;
-    for (size_t c = 0; c < num_chans_; ++c) {
-      if (wr[c] < nsamps_per_buff) { all_full = false; break; }
-    }
-    if (all_full) break;
   }
-
-  // UHD expects “samples per channel”; report the minimum across channels.
-  size_t got_all = SIZE_MAX;
-  for (size_t c = 0; c < num_chans_; ++c) got_all = std::min(got_all, wr[c]);
-  if (got_all == SIZE_MAX || got_all == 0) {
-    md.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
-    return 0;
-  }
-
-  md.error_code     = uhd::rx_metadata_t::ERROR_CODE_NONE;
-  md.start_of_burst = sob_seen;
-  md.end_of_burst   = eob_seen;
-  return got_all;
+  
+  md.error_code = uhd::rx_metadata_t::ERROR_CODE_NONE;
+  return total_samples;
 }
 
+uint64_t flexsdr_rx_streamer::extract_tsf_(rte_mbuf* m) {
+  if (!m || !m->buf_addr || m->data_len < opt_.tsf_offset + sizeof(uint64_t)) {
+    return 0;
+  }
+  
+  // Extract 64-bit timestamp at specified offset
+  const uint64_t* tsf_ptr = rte_pktmbuf_mtod_offset(m, uint64_t*, opt_.tsf_offset);
+  return *tsf_ptr;  // May need endian conversion depending on format
+}
 
 } // namespace flexsdr
