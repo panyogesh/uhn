@@ -2,9 +2,9 @@
 #include <string>
 #include <vector>
 #include "conf/config_params.hpp"
-#include "eal_bootstrap.hpp"
-#include "flexsdr_primary.hpp"
-#include "flexsdr_secondary.hpp"
+#include "transport/eal_bootstrap.hpp"
+#include "transport/flexsdr_primary.hpp"
+#include "transport/flexsdr_secondary.hpp"
 
 static void print_list(const char* tag, const std::vector<std::string>& xs){
   std::printf("%s (%zu):\n", tag, xs.size());

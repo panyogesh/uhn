@@ -1,0 +1,2 @@
+- cmake -S cmake/dpdk-infra -B build-infra -DCMAKE_BUILD_TYPE=Release
+- cmake --build build-infra -j
