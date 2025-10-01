@@ -7,19 +7,6 @@
 
 using namespace flexsdr::conf;
 
-// ---------- NamingPolicy ----------
-std::string NamingPolicy::materialize(Role role, const std::string& base) const {
-  if (!prefix_with_role) return base;
-  std::string r;
-  switch (role) {
-    case Role::primary_ue:   r = "primary-ue";  break;
-    case Role::primary_gnb:  r = "primary-gnb"; break;
-    case Role::ue:           r = "ue";          break;
-    case Role::gnb:          r = "gnb";         break;
-  }
-  return r + separator + base;
-}
-
 // ---------- helpers ----------
 namespace {
 
@@ -90,11 +77,6 @@ std::vector<RingSpec> parse_rings_seq(const YAML::Node& n) {
   return out;
 }
 
-struct StreamSeeds {
-  const Stream& tx_seed;
-  const Stream& rx_seed;
-};
-
 Stream parse_stream(const YAML::Node& n, const Stream& seed) {
   Stream s = seed;
   if (!n) return s;
@@ -158,12 +140,6 @@ PrimaryConfig PrimaryConfig::load(const std::string& yaml_path) {
     cfg.eal.socket_limit= get_opt<std::string>(e,        "socket_limit");
   }
 
-  // naming
-  if (auto nm = root["naming"]) {
-    cfg.naming.prefix_with_role = get_or<bool>(nm, "prefix_with_role", cfg.naming.prefix_with_role);
-    cfg.naming.separator        = get_or<std::string>(nm, "separator",  cfg.naming.separator);
-  }
-
   // defaults
   if (auto d = root["defaults"]) {
     cfg.defaults.nb_mbuf      = get_or<unsigned>(d, "nb_mbuf", cfg.defaults.nb_mbuf);
@@ -222,14 +198,26 @@ const std::vector<PoolSpec>& PrimaryConfig::effective_pools() const {
   return kEmpty;
 }
 
-// ---------- materialized helpers ----------
+// ---------- materialization: "<role>_<base>" ----------
+std::string PrimaryConfig::materialize_name(const std::string& base) const {
+  std::string r;
+  switch (defaults.role) {
+    case Role::primary_ue:   r = "primary-ue";  break;
+    case Role::primary_gnb:  r = "primary-gnb"; break;
+    case Role::ue:           r = "ue";          break;
+    case Role::gnb:          r = "gnb";         break;
+  }
+  if (r.empty()) return base;
+  return r + "_" + base;
+}
+
 std::vector<RingSpec> PrimaryConfig::materialized_tx_rings() const {
   std::vector<RingSpec> out;
   const auto& st = effective_tx_stream();
   out.reserve(st.rings.size());
   for (const auto& r : st.rings) {
     RingSpec rs = r;
-    rs.name = naming.materialize(defaults.role, r.name);
+    rs.name = materialize_name(r.name);
     if (rs.size == 0) rs.size = defaults.ring_size;
     out.emplace_back(std::move(rs));
   }
@@ -242,7 +230,7 @@ std::vector<RingSpec> PrimaryConfig::materialized_rx_rings() const {
   out.reserve(st.rings.size());
   for (const auto& r : st.rings) {
     RingSpec rs = r;
-    rs.name = naming.materialize(defaults.role, r.name);
+    rs.name = materialize_name(r.name);
     if (rs.size == 0) rs.size = defaults.ring_size;
     out.emplace_back(std::move(rs));
   }
@@ -255,7 +243,7 @@ std::vector<RingSpec> PrimaryConfig::materialized_interconnect_rings() const {
   out.reserve(ic.rings.size());
   for (const auto& r : ic.rings) {
     RingSpec rs = r;
-    rs.name = naming.materialize(defaults.role, r.name);
+    rs.name = materialize_name(r.name);
     if (rs.size == 0) rs.size = defaults.ring_size;
     out.emplace_back(std::move(rs));
   }
@@ -301,10 +289,6 @@ std::ostream& flexsdr::conf::operator<<(std::ostream& os, const EalConfig& e) {
   if (e.socket_limit) os << ", socket_limit=" << *e.socket_limit;
   return os << "}";
 }
-std::ostream& flexsdr::conf::operator<<(std::ostream& os, const NamingPolicy& n) {
-  return os << "Naming{prefix_with_role=" << (n.prefix_with_role ? "true" : "false")
-            << ", separator='" << n.separator << "'}";
-}
 std::ostream& flexsdr::conf::operator<<(std::ostream& os, const Stream& s) {
   os << "Stream{mode=" << PrimaryConfig::to_string(s.mode)
      << ", num_channels=" << s.num_channels
@@ -345,7 +329,7 @@ std::ostream& flexsdr::conf::operator<<(std::ostream& os, const RoleConfig& rc) 
   return os << "}";
 }
 std::ostream& flexsdr::conf::operator<<(std::ostream& os, const PrimaryConfig& c) {
-  os << c.eal << "\n" << c.naming << "\n" << c.defaults << "\n";
+  os << c.eal << "\n" << c.defaults << "\n";
   os << "primary-ue=";  if (c.primary_ue)  os << *c.primary_ue;  else os << "{}"; os << "\n";
   os << "primary-gnb="; if (c.primary_gnb) os << *c.primary_gnb; else os << "{}"; os << "\n";
   os << "ue=";          if (c.ue)          os << *c.ue;          else os << "{}"; os << "\n";

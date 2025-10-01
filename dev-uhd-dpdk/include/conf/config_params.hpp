@@ -25,7 +25,7 @@ struct PoolSpec {
   unsigned    elt_size{2048};
 };
 
-// ---------- EAL / naming ----------
+// ---------- EAL ----------
 struct EalConfig {
   std::string file_prefix = "flexsdr-app";
   std::string huge_dir    = "/dev/hugepages";
@@ -33,18 +33,12 @@ struct EalConfig {
   bool        no_pci      = true;
   std::string iova        = "va";
 
-  // Optional RT/NUMA extras
+  // Optional extras
   std::optional<int>         main_lcore;
   std::optional<std::string> lcores;
   std::optional<std::string> isolcpus;
   std::optional<bool>        numa;
   std::optional<std::string> socket_limit;
-};
-
-struct NamingPolicy {
-  bool        prefix_with_role{true};
-  std::string separator{"_"};
-  std::string materialize(Role role, const std::string& base) const; // "<role><sep><base>"
 };
 
 // ---------- streams / defaults ----------
@@ -86,7 +80,6 @@ struct RoleConfig {
 // ---------- root config ----------
 struct PrimaryConfig {
   EalConfig      eal{};
-  NamingPolicy   naming{};
   DefaultConfig  defaults{};
 
   // role blocks (each file will use the ones it needs)
@@ -104,7 +97,8 @@ struct PrimaryConfig {
   InterconnectConfig        effective_interconnect() const; // returns a value (merged)
   const std::vector<PoolSpec>& effective_pools() const;
 
-  // Materialized (prefixed) ring names with size fallback
+  // Materialized names: "<role>_<base>"
+  std::string materialize_name(const std::string& base) const;
   std::vector<RingSpec> materialized_tx_rings() const;
   std::vector<RingSpec> materialized_rx_rings() const;
   std::vector<RingSpec> materialized_interconnect_rings() const;
@@ -119,7 +113,6 @@ struct PrimaryConfig {
 std::ostream& operator<<(std::ostream&, const RingSpec&);
 std::ostream& operator<<(std::ostream&, const PoolSpec&);
 std::ostream& operator<<(std::ostream&, const EalConfig&);
-std::ostream& operator<<(std::ostream&, const NamingPolicy&);
 std::ostream& operator<<(std::ostream&, const Stream&);
 std::ostream& operator<<(std::ostream&, const InterconnectConfig&);
 std::ostream& operator<<(std::ostream&, const DefaultConfig&);

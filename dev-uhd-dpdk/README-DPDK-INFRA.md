@@ -1,2 +1,3 @@
 - cmake -S cmake/dpdk-infra -B build-infra -DCMAKE_BUILD_TYPE=Release
 - cmake --build build-infra -j
+- sudo ./build-infra/test_dpdk_infra  conf/configurations-ue.yaml
