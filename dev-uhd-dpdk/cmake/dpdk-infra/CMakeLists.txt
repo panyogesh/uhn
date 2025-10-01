@@ -119,36 +119,54 @@ target_include_directories(flexsdr_secondary PUBLIC "${FLEXSDR_INC}" ${DPDK_INCL
 target_link_libraries(flexsdr_secondary PUBLIC flexsdr_conf flexsdr_eal ${DPDK_LIBS_SANITIZED} Threads::Threads)
 apply_dpdk_isa(flexsdr_secondary)
 
-# ---------- Test executable ----------
-if(BUILD_TEST_INFRA)
-  add_executable(test_dpdk_infra "${TEST_INFRA_CPP}")
-  target_include_directories(test_dpdk_infra PRIVATE "${FLEXSDR_INC}" ${DPDK_INCLUDE_DIRS})
+# ---------- Test executable (debug-leaning flags; loud logs) ----------
+add_executable(test_dpdk_infra
+  "${CMAKE_SOURCE_DIR}/test_dpdk_infra.cpp"   # sidecar copy
+)
 
-  # Ensure DPDK DSOs aren’t dropped (so constructors run & ring tailq is registered)
-  target_link_options(test_dpdk_infra PRIVATE -Wl,--no-as-needed)
+target_include_directories(test_dpdk_infra PRIVATE
+  "${REPO_ROOT}/include"
+  ${DPDK_INCLUDE_DIRS}
+)
 
-  target_link_libraries(test_dpdk_infra
-    PRIVATE
-      flexsdr_eal
-      flexsdr_primary
-      flexsdr_secondary
-      flexsdr_conf
-      yaml-cpp
-      ${DPDK_LIBS_SANITIZED}
-      Threads::Threads
-  )
+# Keep DPDK DSOs live (so constructors run & tailqs register)
+target_link_options(test_dpdk_infra PRIVATE -Wl,--no-as-needed)
 
-  # Optional: restore as-needed after DPDK linking
-  target_link_options(test_dpdk_infra PRIVATE -Wl,--as-needed)
+# Export symbols so backtrace has names
+target_link_options(test_dpdk_infra PRIVATE -rdynamic)
 
-  # Let the loader find librte_*.so without env tweaks
-  set_target_properties(test_dpdk_infra PROPERTIES
-    BUILD_RPATH   "${DPDK_LIBRARY_DIRS}"
-    INSTALL_RPATH "${DPDK_LIBRARY_DIRS}"
-  )
+# Debug-leaning flags for the test utility
+target_compile_options(test_dpdk_infra PRIVATE
+  -Wall -Wextra -Wno-pedantic -Wno-unused-parameter
+  -g -O1 -fno-omit-frame-pointer
+)
 
-  apply_dpdk_isa(test_dpdk_infra)
+# Optional: AddressSanitizer for fast catches (ON by default for test)
+option(ENABLE_ASAN "Enable AddressSanitizer for test_dpdk_infra" ON)
+if(ENABLE_ASAN)
+  target_compile_options(test_dpdk_infra PRIVATE -fsanitize=address)
+  target_link_options(test_dpdk_infra PRIVATE -fsanitize=address)
 endif()
+
+target_link_libraries(test_dpdk_infra
+  PRIVATE
+    flexsdr_eal
+    flexsdr_primary
+    flexsdr_secondary
+    flexsdr_conf
+    yaml-cpp
+    ${DPDK_LIBS_SANITIZED}
+    Threads::Threads
+)
+
+# Let the loader find librte_*.so without env tweaks
+set_target_properties(test_dpdk_infra PROPERTIES
+  BUILD_RPATH   "${DPDK_LIBRARY_DIRS}"
+  INSTALL_RPATH "${DPDK_LIBRARY_DIRS}"
+)
+
+# Apply ISA flags for DPDK intrinsics
+apply_dpdk_isa(test_dpdk_infra)
 
 # ---------- Warnings ----------
 foreach(tgt IN ITEMS flexsdr_conf flexsdr_eal flexsdr_primary flexsdr_secondary test_dpdk_infra)
