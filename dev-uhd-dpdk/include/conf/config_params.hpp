@@ -1,152 +1,97 @@
 #pragma once
-//
-// config_params.hpp
-//
-// YAML-driven configuration for FlexSDR primary/secondary apps,
-// plus helpers to create/validate DPDK rings & pools.
-//
-// Requires: yaml-cpp, DPDK (rte_eal, rte_ring, rte_mempool, rte_mbuf)
-// C++17
-//
-
-#include <string>
-#include <vector>
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <vector>
+#include <stdexcept>
+#include <ostream>
 
-namespace flexsdr {
+namespace flexsdr::conf {
 
-// -----------------------------
-// Basic config structs
-// -----------------------------
+enum class DataFormat { cs16, cf32 };
+enum class LayoutMode { planar, interleaved };
 
-struct EALConfig {
-  std::string file_prefix;
-  std::string huge_dir;
-  std::string socket_mem;
-  bool        no_pci = true;
-  std::string iova; // "va" or "PA"
+struct Eal {
+  std::string file_prefix = "flexsdr-app";
+  std::string huge_dir    = "/dev/hugepages";
+  std::string socket_mem  = "1024,1024";
+  bool        no_pci      = true;
+  std::string iova        = "va";
+
+  // Optional RT/NUMA extras (will remain std::nullopt if not set)
+  std::optional<int>         main_lcore;
+  std::optional<std::string> lcores;
+  std::optional<std::string> isolcpus;
+  std::optional<bool>        numa;
+  std::optional<std::string> socket_limit;
 };
 
-struct StreamConfig {
-  // "ring" in YAML can be scalar or sequence; we store normalized as a list.
-  std::vector<std::string> rings;
-  std::string mode;            // "Planar" | "interleaved"
-  uint32_t    spp           = 0;
-  uint32_t    num_channels  = 0;
+struct Stream {
+  // One or more ring names to use at this stage (e.g., ["rx0"], ["tx0"])
+  std::vector<std::string> ring;
+
+  // Layout / batching
+  LayoutMode  mode          = LayoutMode::planar;
+  std::size_t spp           = 64;        // samples per packet
+  unsigned    num_channels  = 2;
   bool        allow_partial = true;
-  uint32_t    timeout_us    = 0;
-  bool        busy_poll     = false;
-  uint32_t    burst_dequeue = 0;
-  uint32_t    ring_watermark= 0;
+  uint32_t    timeout_us    = 100;       // dequeue timeout
+  bool        busy_poll     = true;
 
-  // Convenience helpers
-  bool        has_single_ring() const { return rings.size() == 1; }
-  const std::string& single_ring() const { return rings.at(0); }
+  // Optional watermarks (percent, integer 0..100), if set in YAML
+  std::optional<unsigned> high_watermark_pct; // start shedding work
+  std::optional<unsigned> hard_drop_pct;      // drop aggressively
 };
 
-struct DefaultConfig {
-  uint32_t nb_mbuf   = 8192;
-  uint32_t mp_cache  = 256;
-  uint32_t ring_size = 512;
-  std::string data_format; // "cs16" etc.
+struct Defaults {
+  // pools / rings
+  unsigned    nb_mbuf    = 8192;
+  unsigned    mp_cache   = 256;
+  unsigned    ring_size  = 512;     // default ring size to create
+  DataFormat  data_format = DataFormat::cs16;
+  unsigned    num_channels = 2;
 
-  StreamConfig tx_stream;
-  StreamConfig rx_stream;
+  // Provide default stream templates; per-app can override any field
+  Stream rx_stream{};
+  Stream tx_stream{};
 };
 
-struct PoolConf {
-  std::string name;
-  uint32_t    size     = 0;   // number of mbufs/elements
-  uint32_t    elt_size = 0;   // data room size for pktmbuf pools
+// Per-app override container; any field present here overrides Defaults
+struct AppSection {
+  std::optional<Stream>   rx_stream;
+  std::optional<Stream>   tx_stream;
+  // Future: mempool overrides, pacing, etc.
 };
 
-struct RingConf {
-  std::string name;
-  uint32_t    size = 0;
+struct Config {
+  Eal        eal{};
+  Defaults   defaults{};
+  std::optional<AppSection> primary;
+  std::optional<AppSection> ue;
+  std::optional<AppSection> gnb;
+
+  // Load from YAML path (throws std::runtime_error on fatal schema errors)
+  static Config load(const std::string& yaml_path);
+
+  // Convenience: get effective RX/TX stream for a given app ("primary","ue","gnb")
+  const Stream& rx_stream_for(const std::string& app) const;
+  const Stream& tx_stream_for(const std::string& app) const;
+
+  // Shorthands
+  const Stream& primary_rx() const { return rx_stream_for("primary"); }
+  const Stream& primary_tx() const { return tx_stream_for("primary"); }
+  const Stream& ue_rx() const      { return rx_stream_for("ue"); }
+  const Stream& ue_tx() const      { return tx_stream_for("ue"); }
+  const Stream& gnb_rx() const     { return rx_stream_for("gnb"); }
+  const Stream& gnb_tx() const     { return tx_stream_for("gnb"); }
 };
 
-struct PrimaryConfig {
-  std::vector<PoolConf> pools;
-  std::vector<RingConf> rings;
-};
+// Pretty-printers (handy for boot logs)
+std::ostream& operator<<(std::ostream&, DataFormat);
+std::ostream& operator<<(std::ostream&, LayoutMode);
+std::ostream& operator<<(std::ostream&, const Eal&);
+std::ostream& operator<<(std::ostream&, const Stream&);
+std::ostream& operator<<(std::ostream&, const Defaults&);
+std::ostream& operator<<(std::ostream&, const Config&);
 
-struct TestTransmit {
-  bool     enabled     = false;
-  uint32_t pps         = 0;   // 0 => let spp/burst drive
-  uint32_t burst_size  = 0;
-  uint32_t duration_s  = 0;
-};
-
-struct AppConfig {
-  // RX path (into the app)
-  std::string            inbound_ring;
-  std::string            rx_pool;
-  std::vector<int>       rx_cores;
-  StreamConfig           rx_stream;
-
-  // TX path (out of the app)
-  std::string            tx_pool;
-  std::vector<int>       tx_cores;
-  StreamConfig           tx_stream;
-
-  TestTransmit           test_tx;
-};
-
-struct FullConfig {
-  EALConfig    eal;
-  DefaultConfig     defaults;
-  PrimaryConfig primary;
-  AppConfig    ue_app;
-  AppConfig    gnb_app;
-};
-
-// -----------------------------
-// Loaders (parse YAML)
-// -----------------------------
-
-// Load entire file (eal, defaults, primary, ue-app, gnb-app).
-FullConfig load_full_config(const std::string& yaml_file);
-
-// Convenience: load just sections
-PrimaryConfig load_primary_conf_params(const std::string& yaml_file);
-AppConfig    load_ue_config_params(const std::string& yaml_file);
-AppConfig    load_gnb_conf_params(const std::string& yaml_file);
-EALConfig    load_eal_params(const std::string& yaml_file);
-DefaultConfig     load_defaults(const std::string& yaml_file);
-
-// -----------------------------
-// DPDK helpers (optional)
-// -----------------------------
-//
-// create_primary_resources:
-//   - Creates pktmbuf pools for each PrimaryConfig::pools (data room = elt_size)
-//   - Creates rings for each PrimaryConfig::rings
-//
-// validate_secondary_resources:
-//   - Verifies presence of rings/pools needed by a secondary app (ue/gnb)
-//
-// NOTE: Call these *after* rte_eal_init().
-// Returns true on success.
-//
-bool create_primary_resources(const PrimaryConfig& primary,
-                              unsigned socket_id,
-                              unsigned mp_cache_default,
-                              bool allow_existing = true,
-                              unsigned ring_flags = 0 /* RING_F_SP_ENQ|RING_F_SC_DEQ is a good default for SPSC */);
-
-bool validate_secondary_resources(const AppConfig& app,
-                                  bool check_rx = true,
-                                  bool check_tx = true);
-
-// -----------------------------
-// Pretty-print (for logs)
-// -----------------------------
-std::string summarize(const EALConfig& c);
-std::string summarize(const DefaultConfig& d);
-std::string summarize(const StreamConfig& s);
-std::string summarize(const PrimaryConfig& p);
-std::string summarize(const AppConfig& a);
-std::string summarize(const FullConfig& f);
-
-} // namespace flexsdr
+} // namespace flexsdr::conf

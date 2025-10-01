@@ -1,438 +1,238 @@
-//
-// config_params.cpp
-//
-
 #include "conf/config_params.hpp"
-
 #include <yaml-cpp/yaml.h>
-
-#include <stdexcept>
+#include <type_traits>
 #include <sstream>
 #include <iostream>
-#include <algorithm>
 
-// DPDK
-extern "C" {
-#include <rte_config.h>
-#include <rte_eal.h>
-#include <rte_errno.h>
-#include <rte_ring.h>
-#include <rte_mempool.h>
-#include <rte_mbuf.h>
-}
+using namespace flexsdr::conf;
 
-namespace flexsdr {
+// ------------------------- helpers -------------------------
 
-// -----------------------------
-// Small YAML helpers
-// -----------------------------
+namespace {
 
-static inline bool has_key(const YAML::Node& n, const char* k) {
-  return n && n[k];
-}
-
+// Safe fetch with default
 template <typename T>
-static T get_or(const YAML::Node& n, const char* k, const T& def) {
-  if (n && n[k]) return n[k].as<T>();
+T get_or(const YAML::Node& n, const char* key, T def) {
+  if (!n || !n[key]) return def;
+  if constexpr (std::is_same_v<T, std::string>) {
+    return n[key].as<std::string>();
+  } else {
+    return n[key].as<T>();
+  }
+}
+
+// Optional fetch
+template <typename T>
+std::optional<T> get_opt(const YAML::Node& n, const char* key) {
+  if (!n || !n[key]) return std::nullopt;
+  return n[key].as<T>();
+}
+
+LayoutMode parse_layout(const YAML::Node& n, const char* key, LayoutMode def) {
+  auto s = get_or<std::string>(n, key, "");
+  if (s == "planar") return LayoutMode::planar;
+  if (s == "interleaved" || s == "interleave") return LayoutMode::interleaved;
   return def;
 }
 
-static std::string get_str_or(const YAML::Node& n, const char* k, const std::string& def = {}) {
-  if (n && n[k] && n[k].IsScalar()) return n[k].as<std::string>();
+DataFormat parse_format(const YAML::Node& n, const char* key, DataFormat def) {
+  auto s = get_or<std::string>(n, key, "");
+  if (s == "cs16" || s == "i16q16" || s == "iq16") return DataFormat::cs16;
+  if (s == "cf32" || s == "f32") return DataFormat::cf32;
   return def;
 }
 
-static std::vector<std::string> parse_rings_as_list(const YAML::Node& stream_node) {
-  std::vector<std::string> out;
-  if (!stream_node) return out;
-  const auto rn = stream_node["ring"];
-  if (!rn) return out;
+Stream parse_stream(const YAML::Node& n, const Defaults& dflt) {
+  Stream s = dflt.rx_stream; // seed with defaults; caller can choose rx/tx
+  if (!n) return s;
 
-  if (rn.IsScalar()) {
-    auto s = rn.as<std::string>();
-    if (!s.empty()) out.push_back(s);
-  } else if (rn.IsSequence()) {
-    for (auto&& item : rn) {
-      out.push_back(item.as<std::string>());
+  // ring can be a single string or a list
+  if (n["ring"]) {
+    s.ring.clear();
+    if (n["ring"].IsSequence()) {
+      for (auto it : n["ring"]) s.ring.emplace_back(it.as<std::string>());
+    } else {
+      s.ring.emplace_back(n["ring"].as<std::string>());
     }
   }
-  return out;
-}
 
-static StreamConfig merge_stream(const YAML::Node& node, const StreamConfig& base) {
-  StreamConfig s = base;
-  if (!node) return s;
+  s.mode          = parse_layout(n, "mode", s.mode);
+  s.spp           = get_or<std::size_t>(n, "spp", s.spp);
+  s.num_channels  = get_or<unsigned>(n, "num_channels", s.num_channels);
+  s.allow_partial = get_or<bool>(n, "allow_partial", s.allow_partial);
+  s.timeout_us    = get_or<uint32_t>(n, "timeout_us", s.timeout_us);
+  s.busy_poll     = get_or<bool>(n, "busy_poll", s.busy_poll);
 
-  // ring(s)
-  if (node["ring"]) s.rings = parse_rings_as_list(node);
-
-  if (has_key(node, "mode"))            s.mode           = node["mode"].as<std::string>();
-  if (has_key(node, "spp"))             s.spp            = node["spp"].as<uint32_t>();
-  if (has_key(node, "num_channels"))    s.num_channels   = node["num_channels"].as<uint32_t>();
-  if (has_key(node, "allow_partial"))   s.allow_partial  = node["allow_partial"].as<bool>();
-  if (has_key(node, "timeout_us"))      s.timeout_us     = node["timeout_us"].as<uint32_t>();
-  if (has_key(node, "busy_poll"))       s.busy_poll      = node["busy_poll"].as<bool>();
-  if (has_key(node, "burst_dequeue"))   s.burst_dequeue  = node["burst_dequeue"].as<uint32_t>();
-  if (has_key(node, "ring_watermark"))  s.ring_watermark = node["ring_watermark"].as<uint32_t>();
+  s.high_watermark_pct = get_opt<unsigned>(n, "high_watermark_pct");
+  s.hard_drop_pct      = get_opt<unsigned>(n, "hard_drop_pct");
   return s;
 }
 
-static StreamConfig parse_stream_exact(const YAML::Node& node) {
-  // No defaults; use only specified values.
-  StreamConfig base{};
-  return merge_stream(node, base);
-}
-
-static EALConfig parse_eal(const YAML::Node& root) {
-  const auto n = root["eal"];
-  if (!n) throw std::runtime_error("Missing 'eal' section in YAML.");
-
-  EALConfig e;
-  e.file_prefix = get_str_or(n, "file_prefix");
-  e.huge_dir    = get_str_or(n, "huge_dir");
-  e.socket_mem  = get_str_or(n, "socket_mem");
-  e.no_pci      = get_or<bool>(n, "no_pci", true);
-  e.iova        = get_str_or(n, "iova");
-
-  return e;
-}
-
-static DefaultConfig parse_defaults(const YAML::Node& root) {
-  const auto n = root["defaults"];
-  if (!n) throw std::runtime_error("Missing 'defaults' section in YAML.");
-
-  DefaultConfig d;
-  d.nb_mbuf   = get_or<uint32_t>(n, "nb_mbuf", 8192);
-  d.mp_cache  = get_or<uint32_t>(n, "mp_cache", 256);
-  d.ring_size = get_or<uint32_t>(n, "ring_size", 512);
-  d.data_format = get_str_or(n, "data_format");
-
-  d.tx_stream = parse_stream_exact(n["tx_stream"]);
-  d.rx_stream = parse_stream_exact(n["rx_stream"]);
-  return d;
-}
-
-static PrimaryConfig parse_primary(const YAML::Node& root) {
-  const auto n = root["primary"];
-  if (!n) throw std::runtime_error("Missing 'primary' section in YAML.");
-
-  PrimaryConfig p;
-
-  // pools
-  if (n["pools"] && n["pools"].IsSequence()) {
-    for (auto&& item : n["pools"]) {
-      PoolConf pc;
-      pc.name     = get_str_or(item, "name");
-      pc.size     = get_or<uint32_t>(item, "size", 0);
-      pc.elt_size = get_or<uint32_t>(item, "elt_size", 0);
-      if (pc.name.empty() || pc.size==0 || pc.elt_size==0) {
-        throw std::runtime_error("primary.pools: each entry must have name,size,elt_size");
-      }
-      p.pools.push_back(pc);
-    }
+AppSection parse_app(const YAML::Node& n, const Defaults& dflt) {
+  AppSection a;
+  if (!n) return a;
+  if (n["rx_stream"]) {
+    Stream rx = parse_stream(n["rx_stream"], dflt);
+    a.rx_stream = rx;
   }
-
-  // rings
-  if (n["rings"] && n["rings"].IsSequence()) {
-    for (auto&& item : n["rings"]) {
-      RingConf rc;
-      rc.name = get_str_or(item, "name");
-      rc.size = get_or<uint32_t>(item, "size", 0);
-      if (rc.name.empty() || rc.size==0) {
-        throw std::runtime_error("primary.rings: each entry must have name,size");
-      }
-      p.rings.push_back(rc);
-    }
+  if (n["tx_stream"]) {
+    // For tx, seed with defaults.tx_stream then overlay
+    Defaults tmp = dflt;
+    tmp.rx_stream = dflt.tx_stream;
+    Stream tx = parse_stream(n["tx_stream"], tmp);
+    a.tx_stream = tx;
   }
-
-  return p;
-}
-
-static TestTransmit parse_test_tx(const YAML::Node& n) {
-  TestTransmit t;
-  if (!n) return t;
-  t.enabled    = get_or<bool>(n, "enabled", false);
-  t.pps        = get_or<uint32_t>(n, "pps", 0);
-  t.burst_size = get_or<uint32_t>(n, "burst_size", 0);
-  t.duration_s = get_or<uint32_t>(n, "duration_s", 0);
-  return t;
-}
-
-static AppConfig parse_app(const YAML::Node& root,
-                           const char* key,
-                           const DefaultConfig& defs)
-{
-  const auto n = root[key];
-  if (!n) throw std::runtime_error(std::string("Missing '") + key + "' section in YAML.");
-
-  AppConfig a;
-  a.inbound_ring = get_str_or(n, "inbound_ring");
-  a.rx_pool      = get_str_or(n, "rx_pool");
-  a.rx_cores     = get_or<std::vector<int>>(n, "rx_cores", {});
-  a.tx_pool      = get_str_or(n, "tx_pool");
-  a.tx_cores     = get_or<std::vector<int>>(n, "tx_cores", {});
-
-  // Merge app streams over defaults
-  a.rx_stream = merge_stream(n["rx_stream"], defs.rx_stream);
-  a.tx_stream = merge_stream(n["tx_stream"], defs.tx_stream);
-
-  a.test_tx = parse_test_tx(n["test_transmit"]);
   return a;
 }
 
-// -----------------------------
-// Public loaders
-// -----------------------------
+} // namespace
 
-FullConfig load_full_config(const std::string& yaml_file) {
-  YAML::Node root = YAML::LoadFile(yaml_file);
+// ------------------------- loaders -------------------------
 
-  FullConfig cfg;
-  cfg.eal      = parse_eal(root);
-  cfg.defaults = parse_defaults(root);
-  cfg.primary  = parse_primary(root);
-  cfg.ue_app   = parse_app(root, "ue-app",  cfg.defaults);
-  cfg.gnb_app  = parse_app(root, "gnb-app", cfg.defaults);
+Config Config::load(const std::string& yaml_path) {
+  YAML::Node root = YAML::LoadFile(yaml_path);
+  if (!root) throw std::runtime_error("Failed to load YAML: " + yaml_path);
+
+  Config cfg;
+
+  // EAL
+  if (auto e = root["eal"]) {
+    cfg.eal.file_prefix = get_or<std::string>(e, "file_prefix", cfg.eal.file_prefix);
+    cfg.eal.huge_dir    = get_or<std::string>(e, "huge_dir",    cfg.eal.huge_dir);
+    cfg.eal.socket_mem  = get_or<std::string>(e, "socket_mem",  cfg.eal.socket_mem);
+    cfg.eal.no_pci      = get_or<bool>(e,        "no_pci",      cfg.eal.no_pci);
+    cfg.eal.iova        = get_or<std::string>(e, "iova",        cfg.eal.iova);
+
+    cfg.eal.main_lcore  = get_opt<int>(e, "main_lcore");
+    cfg.eal.lcores      = get_opt<std::string>(e, "lcores");
+    cfg.eal.isolcpus    = get_opt<std::string>(e, "isolcpus");
+    cfg.eal.numa        = get_opt<bool>(e, "numa");
+    cfg.eal.socket_limit= get_opt<std::string>(e, "socket_limit");
+  }
+
+  // Defaults
+  if (auto d = root["defaults"]) {
+    cfg.defaults.nb_mbuf     = get_or<unsigned>(d, "nb_mbuf", cfg.defaults.nb_mbuf);
+    cfg.defaults.mp_cache    = get_or<unsigned>(d, "mp_cache", cfg.defaults.mp_cache);
+    cfg.defaults.ring_size   = get_or<unsigned>(d, "ring_size", cfg.defaults.ring_size);
+    cfg.defaults.data_format = parse_format(d, "data_format", cfg.defaults.data_format);
+    cfg.defaults.num_channels= get_or<unsigned>(d, "num_channels", cfg.defaults.num_channels);
+
+    // default streams
+    if (d["rx_stream"]) cfg.defaults.rx_stream = parse_stream(d["rx_stream"], cfg.defaults);
+    if (d["tx_stream"]) {
+      // Seed parser with tx defaults
+      Defaults tmp = cfg.defaults;
+      tmp.rx_stream = cfg.defaults.tx_stream;
+      cfg.defaults.tx_stream = parse_stream(d["tx_stream"], tmp);
+    }
+  }
+
+  // App sections (optional)
+  cfg.primary = root["primary"] ? std::optional<AppSection>(parse_app(root["primary"], cfg.defaults)) : std::nullopt;
+  cfg.ue      = root["ue"]      ? std::optional<AppSection>(parse_app(root["ue"], cfg.defaults))      : std::nullopt;
+  cfg.gnb     = root["gnb"]     ? std::optional<AppSection>(parse_app(root["gnb"], cfg.defaults))     : std::nullopt;
+
   return cfg;
 }
 
-PrimaryConfig load_primary_conf_params(const std::string& yaml_file) {
-  YAML::Node root = YAML::LoadFile(yaml_file);
-  return parse_primary(root);
+// ------------------------- effective getters -------------------------
+
+static const AppSection* pick_app(const Config& c, const std::string& app) {
+  if (app == "primary") return c.primary ? &*c.primary : nullptr;
+  if (app == "ue")      return c.ue      ? &*c.ue      : nullptr;
+  if (app == "gnb")     return c.gnb     ? &*c.gnb     : nullptr;
+  return nullptr;
 }
 
-AppConfig load_ue_config_params(const std::string& yaml_file) {
-  YAML::Node root = YAML::LoadFile(yaml_file);
-  auto defs = parse_defaults(root);
-  return parse_app(root, "ue-app", defs);
+const Stream& Config::rx_stream_for(const std::string& app) const {
+  if (auto a = pick_app(*this, app)) {
+    if (a->rx_stream) return *a->rx_stream;
+  }
+  return defaults.rx_stream;
 }
 
-AppConfig load_gnb_conf_params(const std::string& yaml_file) {
-  YAML::Node root = YAML::LoadFile(yaml_file);
-  auto defs = parse_defaults(root);
-  return parse_app(root, "gnb-app", defs);
+const Stream& Config::tx_stream_for(const std::string& app) const {
+  if (auto a = pick_app(*this, app)) {
+    if (a->tx_stream) return *a->tx_stream;
+  }
+  return defaults.tx_stream;
 }
 
-EALConfig load_eal_params(const std::string& yaml_file) {
-  YAML::Node root = YAML::LoadFile(yaml_file);
-  return parse_eal(root);
+// ------------------------- printers -------------------------
+
+std::ostream& flexsdr::conf::operator<<(std::ostream& os, DataFormat f) {
+  switch (f) {
+    case DataFormat::cs16: return os << "cs16";
+    case DataFormat::cf32: return os << "cf32";
+  }
+  return os;
 }
 
-DefaultConfig load_defaults(const std::string& yaml_file) {
-  YAML::Node root = YAML::LoadFile(yaml_file);
-  return parse_defaults(root);
+std::ostream& flexsdr::conf::operator<<(std::ostream& os, LayoutMode m) {
+  switch (m) {
+    case LayoutMode::planar:      return os << "planar";
+    case LayoutMode::interleaved: return os << "interleaved";
+  }
+  return os;
 }
 
-// -----------------------------
-// DPDK helpers
-// -----------------------------
+std::ostream& flexsdr::conf::operator<<(std::ostream& os, const Eal& e) {
+  os << "EAL{file_prefix=" << e.file_prefix
+     << ", huge_dir=" << e.huge_dir
+     << ", socket_mem=" << e.socket_mem
+     << ", no_pci=" << (e.no_pci ? "true" : "false")
+     << ", iova=" << e.iova;
+  if (e.main_lcore)   os << ", main_lcore=" << *e.main_lcore;
+  if (e.lcores)       os << ", lcores=" << *e.lcores;
+  if (e.isolcpus)     os << ", isolcpus=" << *e.isolcpus;
+  if (e.numa)         os << ", numa=" << (*e.numa ? "true" : "false");
+  if (e.socket_limit) os << ", socket_limit=" << *e.socket_limit;
+  return os << "}";
+}
 
-static bool create_one_pktmbuf_pool(const PoolConf& pc,
-                                    unsigned socket_id,
-                                    unsigned cache_size,
-                                    bool allow_existing)
-{
-  // If already present and allowed, reuse
-  if (allow_existing) {
-    if (auto* mp = rte_mempool_lookup(pc.name.c_str())) {
-      (void)mp;
-      return true;
+std::ostream& flexsdr::conf::operator<<(std::ostream& os, const Stream& s) {
+  os << "Stream{ring=[";
+  for (std::size_t i = 0; i < s.ring.size(); ++i) {
+    if (i) os << ",";
+    os << s.ring[i];
+  }
+  os << "], mode=" << s.mode
+     << ", spp=" << s.spp
+     << ", num_channels=" << s.num_channels
+     << ", allow_partial=" << (s.allow_partial ? "true" : "false")
+     << ", timeout_us=" << s.timeout_us
+     << ", busy_poll=" << (s.busy_poll ? "true" : "false");
+  if (s.high_watermark_pct) os << ", high_wm%=" << *s.high_watermark_pct;
+  if (s.hard_drop_pct)      os << ", hard_drop%=" << *s.hard_drop_pct;
+  return os << "}";
+}
+
+std::ostream& flexsdr::conf::operator<<(std::ostream& os, const Defaults& d) {
+  os << "Defaults{nb_mbuf=" << d.nb_mbuf
+     << ", mp_cache=" << d.mp_cache
+     << ", ring_size=" << d.ring_size
+     << ", data_format=" << d.data_format
+     << ", num_channels=" << d.num_channels
+     << ", rx=" << d.rx_stream
+     << ", tx=" << d.tx_stream
+     << "}";
+  return os;
+}
+
+std::ostream& flexsdr::conf::operator<<(std::ostream& os, const Config& c) {
+  os << c.eal << "\n" << c.defaults << "\n";
+  auto dump_app = [&](const char* name, const std::optional<AppSection>& a){
+    os << name << "{";
+    if (a && a->rx_stream) os << "rx=" << *a->rx_stream;
+    if (a && a->tx_stream) {
+      if (a->rx_stream) os << ", ";
+      os << "tx=" << *a->tx_stream;
     }
-  }
-
-  // Create a pktmbuf pool with the requested data room size
-  // private_size=0, data_room = elt_size
-  rte_mempool* mp = rte_pktmbuf_pool_create(pc.name.c_str(),
-                                            pc.size,
-                                            cache_size,
-                                            0 /* priv_size */,
-                                            pc.elt_size /* data room */,
-                                            socket_id);
-  if (!mp) {
-    std::cerr << "[DPDK] Failed to create pktmbuf pool '" << pc.name
-              << "' size=" << pc.size << " elt=" << pc.elt_size
-              << " socket=" << socket_id << " (rte_errno=" << rte_errno << ")\n";
-    return false;
-  }
-  return true;
+    return os << "}\n";
+  };
+  dump_app("primary", c.primary);
+  dump_app("ue",      c.ue);
+  dump_app("gnb",     c.gnb);
+  return os;
 }
-
-static bool create_one_ring(const RingConf& rc,
-                            unsigned socket_id,
-                            bool allow_existing,
-                            unsigned flags)
-{
-  if (allow_existing) {
-    if (auto* r = rte_ring_lookup(rc.name.c_str())) {
-      (void)r;
-      return true;
-    }
-  }
-
-  rte_ring* r = rte_ring_create(rc.name.c_str(), rc.size, socket_id, flags);
-  if (!r) {
-    std::cerr << "[DPDK] Failed to create ring '" << rc.name
-              << "' size=" << rc.size
-              << " socket=" << socket_id << " (rte_errno=" << rte_errno << ")\n";
-    return false;
-  }
-  return true;
-}
-
-bool create_primary_resources(const PrimaryConfig& primary,
-                              unsigned socket_id,
-                              unsigned mp_cache_default,
-                              bool allow_existing,
-                              unsigned ring_flags)
-{
-  bool ok = true;
-
-  for (const auto& pc : primary.pools) {
-    ok = ok && create_one_pktmbuf_pool(pc, socket_id, mp_cache_default, allow_existing);
-  }
-
-  // Prefer SPSC rings for low latency if caller didn't specify flags
-  unsigned flags = ring_flags;
-  if (flags == 0) {
-    flags = RING_F_SP_ENQ | RING_F_SC_DEQ;
-  }
-  for (const auto& rc : primary.rings) {
-    ok = ok && create_one_ring(rc, socket_id, allow_existing, flags);
-  }
-
-  return ok;
-}
-
-static bool check_pool(const std::string& name) {
-  auto* mp = rte_mempool_lookup(name.c_str());
-  if (!mp) {
-    std::cerr << "[DPDK] Missing mempool '" << name << "'\n";
-    return false;
-  }
-  return true;
-}
-
-static bool check_ring(const std::string& name) {
-  auto* r = rte_ring_lookup(name.c_str());
-  if (!r) {
-    std::cerr << "[DPDK] Missing ring '" << name << "'\n";
-    return false;
-  }
-  return true;
-}
-
-bool validate_secondary_resources(const AppConfig& app, bool check_rx, bool check_tx) {
-  bool ok = true;
-
-  if (check_rx) {
-    if (!app.inbound_ring.empty()) ok = ok && check_ring(app.inbound_ring);
-    if (!app.rx_pool.empty())      ok = ok && check_pool(app.rx_pool);
-
-    // rx_stream may have a single ring reference too
-    if (!app.rx_stream.rings.empty()) {
-      for (const auto& r : app.rx_stream.rings) ok = ok && check_ring(r);
-    }
-  }
-
-  if (check_tx) {
-    if (!app.tx_pool.empty()) ok = ok && check_pool(app.tx_pool);
-    for (const auto& r : app.tx_stream.rings) ok = ok && check_ring(r);
-  }
-
-  return ok;
-}
-
-// -----------------------------
-// Pretty printers
-// -----------------------------
-
-static std::string join(const std::vector<std::string>& v, const char* sep = ",") {
-  std::ostringstream oss;
-  for (size_t i = 0; i < v.size(); ++i) {
-    if (i) oss << sep;
-    oss << v[i];
-  }
-  return oss.str();
-}
-
-static std::string joini(const std::vector<int>& v, const char* sep = ",") {
-  std::ostringstream oss;
-  for (size_t i = 0; i < v.size(); ++i) {
-    if (i) oss << sep;
-    oss << v[i];
-  }
-  return oss.str();
-}
-
-std::string summarize(const EALConfig& c) {
-  std::ostringstream o;
-  o << "EAL{file_prefix='" << c.file_prefix
-    << "', huge_dir='" << c.huge_dir
-    << "', socket_mem='" << c.socket_mem
-    << "', no_pci=" << (c.no_pci ? "true" : "false")
-    << ", iova='" << c.iova << "'}";
-  return o.str();
-}
-
-std::string summarize(const StreamConfig& s) {
-  std::ostringstream o;
-  o << "Stream{rings=[" << join(s.rings)
-    << "], mode=" << s.mode
-    << ", spp=" << s.spp
-    << ", ch=" << s.num_channels
-    << ", allow_partial=" << (s.allow_partial?"true":"false")
-    << ", timeout_us=" << s.timeout_us
-    << ", busy_poll=" << (s.busy_poll?"true":"false")
-    << ", burst_dequeue=" << s.burst_dequeue
-    << ", watermark=" << s.ring_watermark << "}";
-  return o.str();
-}
-
-std::string summarize(const DefaultConfig& d) {
-  std::ostringstream o;
-  o << "DefaultConfig{nb_mbuf=" << d.nb_mbuf
-    << ", mp_cache=" << d.mp_cache
-    << ", ring_size=" << d.ring_size
-    << ", data_format='" << d.data_format << "'\n  tx=" << summarize(d.tx_stream)
-    << "\n  rx=" << summarize(d.rx_stream) << "}";
-  return o.str();
-}
-
-std::string summarize(const PrimaryConfig& p) {
-  std::ostringstream o;
-  o << "Primary{\n  pools=[";
-  for (size_t i=0;i<p.pools.size();++i) {
-    const auto& pc = p.pools[i];
-    if (i) o << ", ";
-    o << "{name='"<<pc.name<<"', size="<<pc.size<<", elt="<<pc.elt_size<<"}";
-  }
-  o << "]\n  rings=[";
-  for (size_t i=0;i<p.rings.size();++i) {
-    const auto& rc = p.rings[i];
-    if (i) o << ", ";
-    o << "{name='"<<rc.name<<"', size="<<rc.size<<"}";
-  }
-  o << "]}";
-  return o.str();
-}
-
-std::string summarize(const AppConfig& a) {
-  std::ostringstream o;
-  o << "App{inbound='"<<a.inbound_ring<<"', rx_pool='"<<a.rx_pool<<"', rx_cores=["<<joini(a.rx_cores)
-    <<"], tx_pool='"<<a.tx_pool<<"', tx_cores=["<<joini(a.tx_cores)<<"]\n  rx="<<summarize(a.rx_stream)
-    <<"\n  tx="<<summarize(a.tx_stream)
-    <<"\n  test_tx={enabled="<<(a.test_tx.enabled?"true":"false")<<", pps="<<a.test_tx.pps
-    <<", burst="<<a.test_tx.burst_size<<", dur_s="<<a.test_tx.duration_s<<"}}";
-  return o.str();
-}
-
-std::string summarize(const FullConfig& f) {
-  std::ostringstream o;
-  o << summarize(f.eal) << "\n"
-    << summarize(f.defaults) << "\n"
-    << summarize(f.primary) << "\nUE " << summarize(f.ue_app)
-    << "\nGNB " << summarize(f.gnb_app);
-  return o.str();
-}
-
-} // namespace flexsdr

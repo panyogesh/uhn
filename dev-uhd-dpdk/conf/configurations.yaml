@@ -13,6 +13,7 @@ defaults:
   mp_cache: 256                       # Larger cache for better performance
   ring_size: 512                      # Reduced for lower latency
   data_format: "cs16"                 # I16,Q16 => 4 bytes/complex
+  role: "ue"
  
   # Streamer defaults (can be overridden per app)
   tx_stream:
