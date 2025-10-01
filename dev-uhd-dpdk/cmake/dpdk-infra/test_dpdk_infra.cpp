@@ -13,10 +13,32 @@
 #include <rte_ring.h>
 #include <rte_mempool.h>
 #include <rte_version.h>
-#include <rte_ring.h>
 
 #include "transport/flexsdr_primary.hpp"
 #include "transport/flexsdr_secondary.hpp"
+
+// ---- DPDK version helpers (builds on 21.x .. 24.x) -----------------------
+#ifndef RTE_VERSION_NUM
+#define RTE_VERSION_NUM(a,b,c,d) ((((a)*100 + (b))*100 + (c))*100 + (d))
+#endif
+#ifndef RTE_VER_YEAR
+#define RTE_VER_YEAR 24
+#define RTE_VER_MONTH 11
+#endif
+#define RTE_AT_LEAST(YY,MM) \
+  ( RTE_VERSION_NUM(RTE_VER_YEAR, RTE_VER_MONTH, 0, 0) >= RTE_VERSION_NUM((YY),(MM),0,0) )
+
+// ---- tiny helpers used below ---------------------------------------------
+static inline const char* mempool_name(const rte_mempool* mp) {
+#if RTE_AT_LEAST(24,11)
+  return rte_mempool_get_name(mp);
+#else
+  return mp ? mp->name : "<null>";
+#endif
+}
+
+static inline const char* ring_name(const rte_ring* r)   { return r ? rte_ring_get_name(r) : "<null>"; }
+static inline unsigned     ring_size(const rte_ring* r)  { return r ? rte_ring_get_size(r)  : 0U; }
 
 // ---------- crash handler ----------
 static void crash_handler(int sig) {
@@ -44,21 +66,16 @@ static void dump_primary(const flexsdr::FlexSDRPrimary& app) {
                app.pools().size(), app.tx_rings().size(), app.rx_rings().size());
 
   for (auto* mp : app.pools()) {
-    if (!mp) continue;
-#if RTE_VERSION >= RTE_VERSION_NUM(24, 11, 0, 0)
-    const char* nm = rte_mempool_get_name(mp);
-#else
-    const char* nm = mp->name;
-#endif
-    std::fprintf(stderr, "  [pool] %s\n", nm ? nm : "(null)");
+    std::fprintf(stderr, "  [pool] %s\n", mempool_name(mp));
   }
+
   for (auto* r : app.tx_rings()) {
     if (!r) continue;
     std::fprintf(stderr, "  [tx]   %s (size=%u)\n", ring_name(r), ring_size(r));
   }
   for (auto* r : app.rx_rings()) {
     if (!r) continue;
-    std::fprintf(stderr, "  [rx]   %s (size=%u)\n", ring_name(r), ring_size(r));
+     std::fprintf(stderr, "  [rx]   %s (size=%u)\n", ring_name(r), ring_size(r));
   }
 }
 
@@ -67,51 +84,14 @@ static void dump_secondary(const flexsdr::FlexSDRSecondary& app) {
                app.pools().size(), app.tx_rings().size(), app.rx_rings().size());
 
   for (auto* mp : app.pools()) {
-#if RTE_VERSION >= RTE_VERSION_NUM(24, 11, 0, 0)
-    const char* nm = mp ? rte_mempool_get_name(mp) : nullptr;
-#else
-    const char* nm = mp ? mp->name : nullptr;
-#endif
-    std::fprintf(stderr, "  [pool] %s\n", nm ? nm : "(null)");
+     std::fprintf(stderr, "  [pool] %s\n", mempool_name(mp));
   }
   for (auto* r : app.tx_rings()) {
-    if (!r) continue;
     std::fprintf(stderr, "  [tx]   %s (size=%u)\n", ring_name(r), ring_size(r));
   }
   for (auto* r : app.rx_rings()) {
-    if (!r) continue;
     std::fprintf(stderr, "  [rx]   %s (size=%u)\n", ring_name(r), ring_size(r));
   }
-}
-
-// -------- version helpers (portable across DPDK versions) ----------
-#ifndef RTE_VERSION_NUM
-// Should exist via <rte_version.h>, but keep a belt-and-suspenders fallback
-#define RTE_VERSION_NUM(a,b,c,d) ((((a) * 100 + (b)) * 100 + (c)) * 100 + (d))
-#endif
-
-#ifndef RTE_VER_YEAR
-// If your DPDK is extremely old (not your case), define sensible defaults
-#define RTE_VER_YEAR  24
-#define RTE_VER_MONTH 11
-#endif
-
-// Compile-time “is my build DPDK >= YY.MM?”
-#define RTE_AT_LEAST(YY,MM) \
-  ( RTE_VERSION_NUM(RTE_VER_YEAR, RTE_VER_MONTH, 0, 0) >= RTE_VERSION_NUM((YY),(MM),0,0) )
-
-// -------- small helpers -----------
-static inline const char* ring_name(const rte_ring* r) {
-#if RTE_AT_LEAST(24,11)
-  return rte_ring_get_name(r);
-#else
-  // Older DPDK exposes struct with .name; keep a safe fallback label if not
-  return r ? r->name : "<null>";
-#endif
-}
-
-static inline unsigned ring_size(const rte_ring* r) {
-  return r ? rte_ring_get_size(r) : 0U;
 }
 
 // ---------- barrier via named pipe ----------
