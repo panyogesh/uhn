@@ -24,12 +24,11 @@ FlexSDRSecondary::FlexSDRSecondary(std::string yaml_path)
 // ----------------- config load -----------------
 void FlexSDRSecondary::load_config() {
   cfg_ = flexsdr::conf::PrimaryConfig::load(yaml_path_);
+
   // (Optional) Log a short summary
-  std::printf("[cfg] (secondary) role=%s, ring_size=%u, prefix_with_role=%s, sep='%s'\n",
+  std::printf("[cfg] (secondary) role=%s, ring_size=%u\n",
               flexsdr::conf::PrimaryConfig::to_string(cfg_.defaults.role).c_str(),
-              cfg_.defaults.ring_size,
-              cfg_.naming.prefix_with_role ? "true" : "false",
-              cfg_.naming.separator.c_str());
+              cfg_.defaults.ring_size);
 }
 
 // ----------------- resource init -----------------
@@ -62,7 +61,7 @@ int FlexSDRSecondary::lookup_role_pools_() {
 
   for (const auto& p : pools_cfg) {
     // Materialize the name using the *secondary* role (e.g., "ue_inbound_pool")
-    const std::string mat = cfg_.naming.materialize(cfg_.defaults.role, p.name);
+    const std::string mat = cfg_.materialize_name(p.name);
     rte_mempool* mp = nullptr;
     int rc = lookup_pool_(mat, &mp);
     if (rc < 0) {

@@ -14,7 +14,7 @@ naming:
 
 defaults:
   # Choose "primary-ue" when running the creator on UE side; "ue" for the secondary.
-  role: primary-ue                 # primary-ue | ue
+  role: ue                 # primary-ue | ue
   nb_mbuf: 8192
   mp_cache: 256
   ring_size: 512

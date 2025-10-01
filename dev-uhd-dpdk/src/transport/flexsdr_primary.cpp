@@ -22,12 +22,11 @@ FlexSDRPrimary::FlexSDRPrimary(std::string yaml_path)
 // ----------------- config load -----------------
 void FlexSDRPrimary::load_config() {
   cfg_ = flexsdr::conf::PrimaryConfig::load(yaml_path_);
+
   // (Optional) Log a short summary
-  std::printf("[cfg] role=%s, ring_size=%u, prefix_with_role=%s, sep='%s'\n",
+  std::printf("[cfg] role=%s, ring_size=%u\n",
               flexsdr::conf::PrimaryConfig::to_string(cfg_.defaults.role).c_str(),
-              cfg_.defaults.ring_size,
-              cfg_.naming.prefix_with_role ? "true" : "false",
-              cfg_.naming.separator.c_str());
+              cfg_.defaults.ring_size);
 }
 
 bool FlexSDRPrimary::is_creator_role() const {
@@ -61,7 +60,7 @@ int FlexSDRPrimary::init_resources() {
 int FlexSDRPrimary::create_pools_() {
   const auto& pools_cfg = cfg_.effective_pools();
   for (const auto& p : pools_cfg) {
-    const std::string mat = cfg_.naming.materialize(cfg_.defaults.role, p.name);
+    const std::string mat = cfg_.materialize_name(p.name);
     rte_mempool* mp = nullptr;
     int rc = create_pool_(mat, p.size, p.elt_size, &mp);
     if (rc < 0) {

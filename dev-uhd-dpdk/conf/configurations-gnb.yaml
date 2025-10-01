@@ -10,7 +10,7 @@ eal:
 
 defaults:
   # Choose "primary-gnb" when running the creator on gNB side; "gnb" for the secondary.
-  role: primary-gnb               # primary-gnb | gnb
+  role: gnb               # primary-gnb | gnb
   nb_mbuf: 8192
   mp_cache: 256
   ring_size: 512
