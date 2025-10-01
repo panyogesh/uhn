@@ -66,7 +66,3 @@ primary-ue:
 ue:
   tx_stream: { <<: *TX_DEFAULT, rings: *TX_RINGS }
   rx_stream: { <<: *RX_DEFAULT, rings: *RX_RINGS }
-
-  # LOOKUP only (created by primary-gnb)
-  interconnect:
-    rings: *INTERCONNECT_RINGS
