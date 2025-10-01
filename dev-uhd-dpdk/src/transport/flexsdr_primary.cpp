@@ -1,4 +1,4 @@
-#include "flexsdr_primary.hpp"
+#include "transport/flexsdr_primary.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -140,17 +140,28 @@ int FlexSDRPrimary::create_or_lookup_ring_(const std::string& name, unsigned siz
   *out = nullptr;
 
   if (is_creator_role()) {
-    // If your topology for a given ring is strictly SPSC, these flags are fastest.
-    // Adjust to MP/MC as needed per-ring later (could be pushed to YAML if necessary).
-    unsigned flags = RING_F_SP_ENQ | RING_F_SC_DEQ;
-
+    // Fast-path flags for SPSC; adjust to MP/MC as needed per ring.
+    const unsigned flags = RING_F_SP_ENQ | RING_F_SC_DEQ;
     rte_ring* r = rte_ring_create(name.c_str(), size, SOCKET_ID_ANY, flags);
     if (!r) {
       if (rte_errno == EEXIST) {
         r = rte_ring_lookup(name.c_str());
       }
     }
-    if (!r) return -rte_errno ? -rte_errno : -1;
-
+    if (!r) {
+      return -rte_errno ? -rte_errno : -1;
+    }
     *out = r;
-    std::printf("[ring]()
+    std::printf("[ring] created: %s (size=%u)\n", name.c_str(), size);
+    return 0;
+  }
+
+  // Lookup-only path for secondaries/consumers in primary process as needed
+  rte_ring* r = rte_ring_lookup(name.c_str());
+  if (!r) {
+    return -rte_errno ? -rte_errno : -1;
+  }
+  *out = r;
+  std::printf("[ring] found: %s\n", name.c_str());
+  return 0;
+}

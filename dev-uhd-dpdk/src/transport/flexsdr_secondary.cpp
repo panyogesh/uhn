@@ -1,4 +1,4 @@
-#include "flexsdr_secondary.hpp"
+#include "transport/flexsdr_secondary.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -79,11 +79,8 @@ int FlexSDRSecondary::lookup_role_pools_() {
 
 int FlexSDRSecondary::lookup_pool_(const std::string& name, rte_mempool** out) {
   *out = nullptr;
-#if RTE_VERSION >= RTE_VERSION_NUM(21, 11, 0, 0)  // adjust if you want version branching
   rte_mempool* mp = rte_mempool_lookup(name.c_str());
-#else
-  rte_mempool* mp = rte_mempool_lookup(name.c_str());
-#endif
+
   if (!mp) return -rte_errno ? -rte_errno : -1;
   *out = mp;
   return 0;

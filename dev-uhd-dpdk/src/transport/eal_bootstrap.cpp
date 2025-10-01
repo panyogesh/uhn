@@ -1,4 +1,4 @@
-#include "eal_bootstrap.hpp"
+#include "transport/eal_bootstrap.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -77,11 +77,11 @@ void EalBootstrap::build_args(const std::vector<std::string>& extra_flags) {
     push_flag(f);
   }
 
-  rebuild_ptrs_();
+  rebuild_ptrs();
 }
 
 int EalBootstrap::init() {
-  rebuild_ptrs_();
+  rebuild_ptrs();
   int argc = static_cast<int>(argv_ptrs_.size());
   char** argv = argv_ptrs_.data();
 
