@@ -48,24 +48,26 @@ static inline std::vector<RingSpec> parse_ring_list(const YAML::Node& n, unsigne
   return out;
 }
 
-static inline std::vector<PoolSpec> parse_pool_list(const YAML::Node& n) {
+// Accepts both legacy keys (n, eltsz, cache_sz) and current keys (size, elt_size, cache).
+std::vector<PoolSpec> parse_pool_list(const YAML::Node& arr) {
   std::vector<PoolSpec> out;
-  if (!n || !n.IsSequence()) return out;
+  if (!arr || !arr.IsSequence()) return out;
 
-  for (const auto& it : n) {
+  for (const auto& it : arr) {
+    if (!it || !it.IsMap()) continue;
+
     PoolSpec p{};
-    if (it.IsScalar()) {
-      p.name     = it.as<std::string>();
-      p.n        = 8192;   // defaults
-      p.eltsz    = 2048;
-      p.cache_sz = 256;
-    } else if (it.IsMap()) {
-      p.name     = as_str(it["name"]);
-      p.n        = as_u32(it["n"],        8192);
-      p.eltsz    = as_u32(it["elt_size"], 2048);
-      p.cache_sz = as_u32(it["cache"],     256);
-    }
-    if (!p.name.empty()) out.push_back(p);
+    p.name     = as_str(it["name"], "");
+    p.size     = as_u32(it["size"],    8192);
+    p.elt_size = as_u32(it["elt_size"], 2048);
+
+    // New key: "cache" (optional). If absent, keep 0 and fall back later.
+    // Also accept legacy "cache_sz" if that existed in older YAML.
+    if (it["cache"])      p.cache = as_u32(it["cache"], 0);
+    else if (it["cache_sz"]) p.cache = as_u32(it["cache_sz"], 0);
+
+    if (p.name.empty()) continue;
+    out.push_back(std::move(p));
   }
   return out;
 }
