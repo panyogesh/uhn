@@ -8,10 +8,6 @@ eal:
   no_pci: true
   iova: "va"
 
-naming:
-  prefix_with_role: true
-  separator: "_"
-
 defaults:
   # Choose "primary-ue" when running the creator on UE side; "ue" for the secondary.
   role: ue                 # primary-ue | ue

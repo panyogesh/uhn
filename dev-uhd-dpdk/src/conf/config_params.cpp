@@ -200,15 +200,8 @@ const std::vector<PoolSpec>& PrimaryConfig::effective_pools() const {
 
 // ---------- materialization: "<role>_<base>" ----------
 std::string PrimaryConfig::materialize_name(const std::string& base) const {
-  std::string r;
-  switch (defaults.role) {
-    case Role::primary_ue:   r = "primary-ue";  break;
-    case Role::primary_gnb:  r = "primary-gnb"; break;
-    case Role::ue:           r = "ue";          break;
-    case Role::gnb:          r = "gnb";         break;
-  }
-  if (r.empty()) return base;
-  return r + "_" + base;
+  // No automatic prefix/suffix anymore. YAML provides the full object names.
+  return base;
 }
 
 std::vector<RingSpec> PrimaryConfig::materialized_tx_rings() const {
