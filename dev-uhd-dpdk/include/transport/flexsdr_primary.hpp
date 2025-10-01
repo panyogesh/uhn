@@ -35,6 +35,10 @@ private:
   int  create_pools_();
   int  create_rings_tx_();
   int  create_rings_rx_();
+  static int create_ring_(const std::string& name, unsigned size, rte_ring** out);
+  static int lookup_ring_(const std::string& name, rte_ring** out);
+  static int lookup_pool_(const std::string& name, rte_mempool** out);
+  
 
   // Create (or get-if-exists) a ring; returns 0 on success, -errno on fail
   int  create_or_lookup_ring_(const std::string& name, unsigned size, rte_ring** out);

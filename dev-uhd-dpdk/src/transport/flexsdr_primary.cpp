@@ -180,19 +180,31 @@ int FlexSDRPrimary::create_rings_rx_() {
   return 0;
 }
 
-int FlexSDRPrimary::lookup_interconnect_() {
-  if (!cfg_.defaults.interconnect || cfg_.defaults.interconnect->rings.empty())
-    return 0;
+int FlexSDRSecondary::lookup_interconnect_() {
+  // defaults.interconnect is a value (not optional) in the current schema.
+  const auto& ic = cfg_.defaults.interconnect;
 
-  for (const auto& r : cfg_.defaults.interconnect->rings) {
+  if (ic.rings.empty()) {
+    std::fprintf(stderr, "[secondary] no interconnect rings configured in defaults\n");
+    return 0; // not an error
+  }
+
+  std::fprintf(stderr, "[secondary] looking up interconnect rings from defaults…\n");
+  for (const auto& r : ic.rings) {
     rte_ring* ptr = nullptr;
     int rc = lookup_ring_(r.name, &ptr);
     if (rc) {
-      std::fprintf(stderr, "[ic] WARN: interconnect ring missing (ok if gNB not running yet): %s\n",
-                   r.name.c_str());
-      continue;
+      std::fprintf(stderr, "[secondary] interconnect ring lookup failed: %s (rc=%d rte_errno=%d)\n",
+                   r.name.c_str(), rc, rte_errno);
+      return rc;
     }
-    std::fprintf(stderr, "[ic] found interconnect: %s\n", r.name.c_str());
+    std::fprintf(stderr, "[secondary] interconnect ring ok: %s (size=%u)\n",
+                 r.name.c_str(), rte_ring_get_size(ptr));
+
+    // If you want to expose them to the dumper, choose where to store them.
+    // For now, we’ll just attach them to rx_rings_ (or tx_rings_) as needed.
+    // If you want to keep them separate, add a dedicated container in the class.
+    rx_rings_.push_back(ptr);
   }
   return 0;
 }
