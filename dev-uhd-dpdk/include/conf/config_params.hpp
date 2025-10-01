@@ -8,17 +8,32 @@
 
 namespace flexsdr::conf {
 
+// ---------- enums ----------
 enum class DataFormat { cs16, cf32 };
 enum class LayoutMode { planar, interleaved };
+enum class Role { primary_ue, primary_gnb, ue, gnb };
 
-struct Eal {
+// ---------- small specs ----------
+struct RingSpec {
+  std::string name;      // base name from YAML (e.g., "tx_ch1")
+  unsigned    size{0};   // 0 => use defaults.ring_size
+};
+
+struct PoolSpec {
+  std::string name;      // base name (e.g., "inbound_pool")
+  unsigned    size{8192};
+  unsigned    elt_size{2048};
+};
+
+// ---------- EAL / naming ----------
+struct EalConfig {
   std::string file_prefix = "flexsdr-app";
   std::string huge_dir    = "/dev/hugepages";
-  std::string socket_mem  = "1024,1024";
+  std::string socket_mem  = "512,512";
   bool        no_pci      = true;
   std::string iova        = "va";
 
-  // Optional RT/NUMA extras (will remain std::nullopt if not set)
+  // Optional RT/NUMA extras
   std::optional<int>         main_lcore;
   std::optional<std::string> lcores;
   std::optional<std::string> isolcpus;
@@ -26,72 +41,89 @@ struct Eal {
   std::optional<std::string> socket_limit;
 };
 
+struct NamingPolicy {
+  bool        prefix_with_role{true};
+  std::string separator{"_"};
+  std::string materialize(Role role, const std::string& base) const; // "<role><sep><base>"
+};
+
+// ---------- streams / defaults ----------
 struct Stream {
-  // One or more ring names to use at this stage (e.g., ["rx0"], ["tx0"])
-  std::vector<std::string> ring;
-
-  // Layout / batching
-  LayoutMode  mode          = LayoutMode::planar;
-  std::size_t spp           = 64;        // samples per packet
-  unsigned    num_channels  = 2;
-  bool        allow_partial = true;
-  uint32_t    timeout_us    = 100;       // dequeue timeout
-  bool        busy_poll     = true;
-
-  // Optional watermarks (percent, integer 0..100), if set in YAML
-  std::optional<unsigned> high_watermark_pct; // start shedding work
-  std::optional<unsigned> hard_drop_pct;      // drop aggressively
+  LayoutMode  mode{LayoutMode::planar};
+  unsigned    num_channels{2};
+  bool        allow_partial{true};
+  uint32_t    timeout_us{10};
+  bool        busy_poll{true};
+  std::optional<unsigned> high_watermark_pct; // %
+  std::optional<unsigned> hard_drop_pct;      // %
+  std::vector<RingSpec>   rings{};
 };
 
-struct Defaults {
-  // pools / rings
-  unsigned    nb_mbuf    = 8192;
-  unsigned    mp_cache   = 256;
-  unsigned    ring_size  = 512;     // default ring size to create
-  DataFormat  data_format = DataFormat::cs16;
-  unsigned    num_channels = 2;
-
-  // Provide default stream templates; per-app can override any field
-  Stream rx_stream{};
-  Stream tx_stream{};
+struct InterconnectConfig {
+  std::vector<RingSpec> rings{};  // e.g., [{ name: "pg_to_pu", size: 512 }, ...]
 };
 
-// Per-app override container; any field present here overrides Defaults
-struct AppSection {
-  std::optional<Stream>   rx_stream;
-  std::optional<Stream>   tx_stream;
-  // Future: mempool overrides, pacing, etc.
+struct DefaultConfig {
+  unsigned    nb_mbuf{8192};
+  unsigned    mp_cache{256};
+  unsigned    ring_size{512};
+  DataFormat  data_format{DataFormat::cs16};
+  Role        role{Role::primary_ue};
+
+  Stream              tx_stream{};
+  Stream              rx_stream{};
+  InterconnectConfig  interconnect{};
 };
 
-struct Config {
-  Eal        eal{};
-  Defaults   defaults{};
-  std::optional<AppSection> primary;
-  std::optional<AppSection> ue;
-  std::optional<AppSection> gnb;
-
-  // Load from YAML path (throws std::runtime_error on fatal schema errors)
-  static Config load(const std::string& yaml_path);
-
-  // Convenience: get effective RX/TX stream for a given app ("primary","ue","gnb")
-  const Stream& rx_stream_for(const std::string& app) const;
-  const Stream& tx_stream_for(const std::string& app) const;
-
-  // Shorthands
-  const Stream& primary_rx() const { return rx_stream_for("primary"); }
-  const Stream& primary_tx() const { return tx_stream_for("primary"); }
-  const Stream& ue_rx() const      { return rx_stream_for("ue"); }
-  const Stream& ue_tx() const      { return tx_stream_for("ue"); }
-  const Stream& gnb_rx() const     { return rx_stream_for("gnb"); }
-  const Stream& gnb_tx() const     { return tx_stream_for("gnb"); }
+// ---------- per-role override block ----------
+struct RoleConfig {
+  std::optional<Stream>          tx_stream;
+  std::optional<Stream>          rx_stream;
+  std::vector<PoolSpec>          pools;        // creator roles
+  std::optional<InterconnectConfig> interconnect;
 };
 
-// Pretty-printers (handy for boot logs)
-std::ostream& operator<<(std::ostream&, DataFormat);
-std::ostream& operator<<(std::ostream&, LayoutMode);
-std::ostream& operator<<(std::ostream&, const Eal&);
+// ---------- root config ----------
+struct PrimaryConfig {
+  EalConfig      eal{};
+  NamingPolicy   naming{};
+  DefaultConfig  defaults{};
+
+  // role blocks (each file will use the ones it needs)
+  std::optional<RoleConfig> primary_ue;
+  std::optional<RoleConfig> primary_gnb;
+  std::optional<RoleConfig> ue;
+  std::optional<RoleConfig> gnb;
+
+  // Load from YAML file path
+  static PrimaryConfig load(const std::string& yaml_path);
+
+  // Effective configs for the current defaults.role
+  const Stream&             effective_tx_stream() const;
+  const Stream&             effective_rx_stream() const;
+  InterconnectConfig        effective_interconnect() const; // returns a value (merged)
+  const std::vector<PoolSpec>& effective_pools() const;
+
+  // Materialized (prefixed) ring names with size fallback
+  std::vector<RingSpec> materialized_tx_rings() const;
+  std::vector<RingSpec> materialized_rx_rings() const;
+  std::vector<RingSpec> materialized_interconnect_rings() const;
+
+  // Helpers
+  static std::string to_string(Role r);
+  static std::string to_string(DataFormat f);
+  static std::string to_string(LayoutMode m);
+};
+
+// ---------- printers ----------
+std::ostream& operator<<(std::ostream&, const RingSpec&);
+std::ostream& operator<<(std::ostream&, const PoolSpec&);
+std::ostream& operator<<(std::ostream&, const EalConfig&);
+std::ostream& operator<<(std::ostream&, const NamingPolicy&);
 std::ostream& operator<<(std::ostream&, const Stream&);
-std::ostream& operator<<(std::ostream&, const Defaults&);
-std::ostream& operator<<(std::ostream&, const Config&);
+std::ostream& operator<<(std::ostream&, const InterconnectConfig&);
+std::ostream& operator<<(std::ostream&, const DefaultConfig&);
+std::ostream& operator<<(std::ostream&, const RoleConfig&);
+std::ostream& operator<<(std::ostream&, const PrimaryConfig&);
 
 } // namespace flexsdr::conf

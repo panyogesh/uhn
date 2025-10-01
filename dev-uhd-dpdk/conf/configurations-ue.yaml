@@ -1,0 +1,76 @@
+# =========================
+# UE-Side FlexSDR Config (Primary-UE & UE)
+# =========================
+eal:
+  file_prefix: "flexsdr-app"
+  huge_dir: "/dev/hugepages"
+  socket_mem: "512,512"
+  no_pci: true
+  iova: "va"
+
+naming:
+  prefix_with_role: true
+  separator: "_"
+
+defaults:
+  # Choose "primary-ue" when running the creator on UE side; "ue" for the secondary.
+  role: primary-ue                 # primary-ue | ue
+  nb_mbuf: 8192
+  mp_cache: 256
+  ring_size: 512
+  data_format: cs16
+
+  # ---- Stream defaults (anchors) ----
+  tx_stream: &TX_DEFAULT
+    mode: planar
+    num_channels: 2
+    allow_partial: true
+    timeout_us: 10
+    busy_poll: true
+    rings: &TX_RINGS
+      - { name: "ue_tx_ch1",       size: 512 }
+      - { name: "ue_tx_ch2",       size: 512 }
+
+  rx_stream: &RX_DEFAULT
+    mode: planar
+    num_channels: 4
+    allow_partial: true
+    timeout_us: 10
+    busy_poll: true
+    rings: &RX_RINGS
+      - { name: "ue_inbound_ring", size: 512 }
+
+  # ---- Interconnect (PG ⇄ PU) base names (CREATED ON GNB SIDE) ----
+  interconnect:
+    rings: &INTERCONNECT_RINGS
+      - { name: "pg_to_pu",     size: 512 }   # Primary-GNB → Primary-UE
+      - { name: "pu_to_pg",     size: 512 }   # Primary-UE  → Primary-GNB
+
+# -------- Roles on UE-side host --------
+
+# Creator that talks to UE hardware; creates its OWN IO pools/rings,
+# but only LOOKS UP the interconnect rings (which are created by Primary-GNB).
+primary-ue:
+  pools:
+    - { name: "ue_inbound_pool",   size: 8192, elt_size: 2048 }
+    - { name: "ue_outbound_pool",  size: 8192, elt_size: 2048 }
+
+  tx_stream:
+    <<: *TX_DEFAULT
+    rings: *TX_RINGS
+  rx_stream:
+    <<: *RX_DEFAULT
+    rings: *RX_RINGS
+
+  # LOOKUP only (created by primary-gnb)
+  interconnect:
+    rings: *INTERCONNECT_RINGS
+
+# Secondary UE process: lookup only
+ue:
+  tx_stream: { <<: *TX_DEFAULT, rings: *TX_RINGS }
+  rx_stream: { <<: *RX_DEFAULT, rings: *RX_RINGS }
+
+  # LOOKUP only (created by primary-gnb)
+  interconnect:
+    rings: *INTERCONNECT_RINGS

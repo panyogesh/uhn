@@ -57,7 +57,7 @@ static rte_mempool* lookup_pool(const std::string& name) {
 
 // ---------- main attach ----------
 
-int attach_secondary_app(const AppConfig& app,
+int attach_secondary_app(const PrimaryConfig& primary,
                          const DefaultConfig& /*defaults*/,
                          const char* app_name,
                          Handles& out,

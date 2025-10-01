@@ -1,0 +1,76 @@
+# =========================
+# gNB-Side FlexSDR Config (Primary-GNB & gNB)
+# =========================
+eal:
+  file_prefix: "flexsdr-app"
+  huge_dir: "/dev/hugepages"
+  socket_mem: "512,512"
+  no_pci: true
+  iova: "va"
+
+defaults:
+  # Choose "primary-gnb" when running the creator on gNB side; "gnb" for the secondary.
+  role: primary-gnb               # primary-gnb | gnb
+  nb_mbuf: 8192
+  mp_cache: 256
+  ring_size: 512
+  data_format: cs16
+
+  # ---- Stream defaults (anchors) ----
+  tx_stream: &TX_DEFAULT
+    mode: interleaved
+    num_channels: 2
+    allow_partial: true
+    timeout_us: 10
+    busy_poll: true
+    rings: &TX_RINGS
+      - { name: "gnb_tx_ch1",       size: 512 }
+      - { name: "gnb_tx_ch2",       size: 512 }
+
+  rx_stream: &RX_DEFAULT
+    mode: interleaved
+    num_channels: 4
+    allow_partial: true
+    timeout_us: 10
+    busy_poll: true
+    rings: &RX_RINGS
+      - { name: "gnb_inbound_ring", size: 512 }
+
+  # ---- Interconnect (PG ⇄ PU) base names (CREATED HERE) ----
+  interconnect:
+    rings: &INTERCONNECT_RINGS
+      - { name: "pg_to_pu",     size: 512 }   # Primary-GNB → Primary-UE
+      - { name: "pu_to_pg",     size: 512 }   # Primary-UE  → Primary-GNB
+
+# -------- Roles on gNB-side host --------
+
+# Creator that talks to gNB hardware; creates its OWN IO pools/rings,
+# and ALSO CREATES the interconnect pool + rings for PG ⇄ PU.
+primary-gnb:
+  # Pools for normal IO
+  pools:
+    - { name: "gnb_inbound_pool",     size: 8192, elt_size: 2048 }
+    - { name: "gnb_outbound_pool",    size: 8192, elt_size: 2048 }
+    # Extra pool dedicated for the interconnect path
+    - { name: "interconnect_pool", size: 4096, elt_size: 2048 }
+
+  # Normal IO streams
+  tx_stream:
+    <<: *TX_DEFAULT
+    rings: *TX_RINGS
+  rx_stream:
+    <<: *RX_DEFAULT
+    rings: *RX_RINGS
+
+  # *** CREATE the interconnect ring pair ***
+  interconnect:
+    rings: *INTERCONNECT_RINGS
+
+# Secondary gNB process: lookup only
+gnb:
+  tx_stream: { <<: *TX_DEFAULT, rings: *TX_RINGS }
+  rx_stream: { <<: *RX_DEFAULT, rings: *RX_RINGS }
+
+  # LOOKUP only (created by primary-gnb)
+  interconnect:
+    rings: *INTERCONNECT_RINGS

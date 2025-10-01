@@ -39,15 +39,24 @@ int create_primary_objects(const PrimaryConfig& primary,
                            int socket_id,
                            unsigned ring_flags)
 {
+  std::string prefix;
+
+  if (defaults.role == Role::ue) {
+      prefix = "ue_";
+  } else {
+     prefix = "gnb_";
+  }
+
   // Pools
   for (const auto& pd : primary.pools) {
-    auto* mp = create_pktmbuf_pool(pd.name, pd.size, defaults.mp_cache, pd.elt_size, socket_id);
+
+    auto* mp = create_pktmbuf_pool(prefix + pd.name, pd.size, defaults.mp_cache, pd.elt_size, socket_id);
     if (!mp) return -1;
     out.pools[pd.name] = mp;
   }
   // Rings
   for (const auto& rd : primary.rings) {
-    auto* r = create_ring(rd.name, rd.size, socket_id, ring_flags);
+    auto* r = create_ring(prefix + rd.name, rd.size, socket_id, ring_flags);
     if (!r) return -2;
     out.rings[rd.name] = r;
   }
