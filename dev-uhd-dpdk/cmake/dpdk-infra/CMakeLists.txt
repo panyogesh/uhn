@@ -168,8 +168,88 @@ set_target_properties(test_dpdk_infra PROPERTIES
 # Apply ISA flags for DPDK intrinsics
 apply_dpdk_isa(test_dpdk_infra)
 
+# ---------- New Test Executables: Primary and Secondary UE ----------
+
+# Primary UE Test
+add_executable(testcase_primary_dpdk_infra
+  "${CMAKE_SOURCE_DIR}/testcase_primary_dpdk_infra.cpp"
+)
+
+target_include_directories(testcase_primary_dpdk_infra PRIVATE
+  "${REPO_ROOT}/include"
+  ${DPDK_INCLUDE_DIRS}
+)
+
+target_link_options(testcase_primary_dpdk_infra PRIVATE -Wl,--no-as-needed -rdynamic)
+
+target_compile_options(testcase_primary_dpdk_infra PRIVATE
+  -Wall -Wextra -Wno-pedantic -Wno-unused-parameter
+  -g -O1 -fno-omit-frame-pointer
+)
+
+if(ENABLE_ASAN)
+  target_compile_options(testcase_primary_dpdk_infra PRIVATE -fsanitize=address)
+  target_link_options(testcase_primary_dpdk_infra PRIVATE -fsanitize=address)
+endif()
+
+target_link_libraries(testcase_primary_dpdk_infra
+  PRIVATE
+    flexsdr_eal
+    flexsdr_primary
+    flexsdr_conf
+    yaml-cpp
+    ${DPDK_LIBS_SANITIZED}
+    Threads::Threads
+)
+
+set_target_properties(testcase_primary_dpdk_infra PROPERTIES
+  BUILD_RPATH   "${DPDK_LIBRARY_DIRS}"
+  INSTALL_RPATH "${DPDK_LIBRARY_DIRS}"
+)
+
+apply_dpdk_isa(testcase_primary_dpdk_infra)
+
+# Secondary UE Test
+add_executable(testcase_secondary_dpdk_infra
+  "${CMAKE_SOURCE_DIR}/testcase_secondary_dpdk_infra.cpp"
+)
+
+target_include_directories(testcase_secondary_dpdk_infra PRIVATE
+  "${REPO_ROOT}/include"
+  ${DPDK_INCLUDE_DIRS}
+)
+
+target_link_options(testcase_secondary_dpdk_infra PRIVATE -Wl,--no-as-needed -rdynamic)
+
+target_compile_options(testcase_secondary_dpdk_infra PRIVATE
+  -Wall -Wextra -Wno-pedantic -Wno-unused-parameter
+  -g -O1 -fno-omit-frame-pointer
+)
+
+if(ENABLE_ASAN)
+  target_compile_options(testcase_secondary_dpdk_infra PRIVATE -fsanitize=address)
+  target_link_options(testcase_secondary_dpdk_infra PRIVATE -fsanitize=address)
+endif()
+
+target_link_libraries(testcase_secondary_dpdk_infra
+  PRIVATE
+    flexsdr_eal
+    flexsdr_secondary
+    flexsdr_conf
+    yaml-cpp
+    ${DPDK_LIBS_SANITIZED}
+    Threads::Threads
+)
+
+set_target_properties(testcase_secondary_dpdk_infra PROPERTIES
+  BUILD_RPATH   "${DPDK_LIBRARY_DIRS}"
+  INSTALL_RPATH "${DPDK_LIBRARY_DIRS}"
+)
+
+apply_dpdk_isa(testcase_secondary_dpdk_infra)
+
 # ---------- Warnings ----------
-foreach(tgt IN ITEMS flexsdr_conf flexsdr_eal flexsdr_primary flexsdr_secondary test_dpdk_infra)
+foreach(tgt IN ITEMS flexsdr_conf flexsdr_eal flexsdr_primary flexsdr_secondary test_dpdk_infra testcase_primary_dpdk_infra testcase_secondary_dpdk_infra)
   if(TARGET ${tgt})
     target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wno-pedantic -Wno-unused-parameter)
   endif()
