@@ -5,6 +5,7 @@
 #include <rte_errno.h>
 #include <rte_mempool.h>
 #include <rte_ring.h>
+#include <rte_mbuf.h>
 
 using std::string;
 namespace flexsdr {
