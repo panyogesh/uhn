@@ -25,7 +25,6 @@ defaults:
     busy_poll: true
     rings: &TX_RINGS
       - { name: "ue_tx_ch1",       size: 512 }
-      - { name: "ue_tx_ch2",       size: 512 }
 
   rx_stream: &RX_DEFAULT
     mode: planar

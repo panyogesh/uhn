@@ -63,6 +63,10 @@ private:
     unsigned    burst_ = 32;
     bool        allow_partial_ = true;
     std::size_t  num_chans_ = 1;   // default one channel
+    
+    // VRT header configuration (set to 0 to disable VRT headers)
+    std::size_t vrt_hdr_bytes_ = 32;  // default VRT header size
+    uint32_t    stream_id_ = 0;       // default stream ID
 };
 
 } //namespace flexsdr

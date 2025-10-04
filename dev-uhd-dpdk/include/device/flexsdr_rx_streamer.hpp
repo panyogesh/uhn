@@ -100,10 +100,6 @@ public:
       const std::shared_ptr<uhd::rfnoc::action_info>&, 
       const size_t) override {}
 
-  // Runtime configuration
-  void set_num_channels(size_t n) { opt_.num_channels = n ? n : 1; }
-  void set_ring(rte_ring* ring) { opt_.ring = ring; }
-  
   // Accessors
   uint16_t queue_id() const { return opt_.qid; }
   rte_ring* ring() const { return opt_.ring; }
