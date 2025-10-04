@@ -7,13 +7,26 @@
 #include <rte_ring.h>
 
 #include "conf/config_params.hpp"
+#include "device/flexsdr_tx_streamer.hpp"  // for TxBackend
 
 namespace flexsdr {
 
-class FlexSDRSecondary {
+class FlexSDRSecondary : public TxBackend {
 public:
   explicit FlexSDRSecondary(std::string yaml_path);
+  ~FlexSDRSecondary() override = default;
+  
   int init_resources(); // lookup-only
+
+  // TxBackend interface implementation
+  bool send_burst(std::size_t chan,
+                  const void* data,
+                  std::size_t bytes,
+                  uint64_t tsf,
+                  uint32_t spp,
+                  uint16_t fmt,
+                  bool sob,
+                  bool eob) override;
 
   // Legacy vector access
   const std::vector<rte_mempool*>& pools()    const { return pools_;    }

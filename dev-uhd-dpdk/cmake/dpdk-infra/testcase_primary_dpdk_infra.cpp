@@ -33,13 +33,18 @@ int main(int argc, char** argv) {
   std::fprintf(stderr, "========================================\n\n");
 
   if (argc < 2) {
-    std::fprintf(stderr, "Usage: %s <config.yaml>\n", argv[0]);
+    std::fprintf(stderr, "Usage: %s <config.yaml> [mode]\n", argv[0]);
+    std::fprintf(stderr, "  mode: rx (default) or tx\n");
     std::fprintf(stderr, "Example: %s conf/configurations-ue.yaml\n", argv[0]);
+    std::fprintf(stderr, "Example: %s conf/configurations-ue.yaml tx\n", argv[0]);
     return 2;
   }
 
   std::string cfg_path = argv[1];
+  std::string mode = (argc >= 3) ? argv[2] : "rx";
+  
   std::fprintf(stderr, "[primary-ue] Loading config from: %s\n", cfg_path.c_str());
+  std::fprintf(stderr, "[primary-ue] Mode: %s\n", mode.c_str());
 
   setup_signal_handlers();
 
@@ -100,32 +105,76 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "    * %s (size=%u)\n", ring->name, rte_ring_get_size(ring));
   }
   std::fprintf(stderr, "\n[primary-ue] Ready for secondary processes to attach.\n");
-  std::fprintf(stderr, "[primary-ue] Receiving IQ samples from secondary...\n");
   std::fprintf(stderr, "[primary-ue] Press Ctrl+C to shutdown gracefully...\n\n");
 
-  
-  if (tx_rings.empty()) {
-    std::fprintf(stderr, "[primary-ue] ERROR: No TX rings available\n");
-    return 1;
-  }
+  if (mode == "tx") {
+    // TX MODE: Send packets to secondary via RX rings
+    if (rx_rings.empty() || pools.empty()) {
+      std::fprintf(stderr, "[primary-ue] ERROR: No RX rings or pools available for TX mode\n");
+      return 1;
+    }
+    
+    std::fprintf(stderr, "[primary-ue] TX MODE: Sending 60 bursts to secondary...\n\n");
+    
+    rte_ring* rx_ring = rx_rings[0];
+    rte_mempool* pool = pools[0];
+    const uint64_t max_bursts = 60;
+    uint64_t total_sent = 0;
+    
+    for (uint64_t burst = 1; burst <= max_bursts && !g_shutdown_requested.load(); burst++) {
+      rte_mbuf* m = rte_pktmbuf_alloc(pool);
+      if (!m) {
+        std::fprintf(stderr, "[primary-ue] ERROR: Failed to allocate mbuf\n");
+        break;
+      }
+      
+      // Fill with test pattern
+      int16_t* data = rte_pktmbuf_mtod(m, int16_t*);
+      for (int i = 0; i < 512; i++) {
+        data[i*2] = (int16_t)(burst * 100 + i);  // I
+        data[i*2+1] = (int16_t)(burst * 100 + i + 1);  // Q
+      }
+      m->data_len = 2048;  // 512 IQ samples
+      m->pkt_len = 2048;
+      
+      // Send to RX ring
+      unsigned n = rte_ring_enqueue_burst(rx_ring, reinterpret_cast<void**>(&m), 1, nullptr);
+      if (n > 0) {
+        total_sent++;
+        if (burst <= 3 || burst % 20 == 0) {
+          std::fprintf(stderr, "[primary-ue] Sent burst %lu\n", burst);
+        }
+      } else {
+        rte_pktmbuf_free(m);
+        std::fprintf(stderr, "[primary-ue] WARNING: Ring full, failed to send burst %lu\n", burst);
+      }
+      
+      usleep(1000);  // 1ms delay between bursts
+    }
+    
+    std::fprintf(stderr, "\n========================================\n");
+    std::fprintf(stderr, "[primary-ue] TX MODE COMPLETE\n");
+    std::fprintf(stderr, "Total bursts sent: %lu\n", total_sent);
+    std::fprintf(stderr, "========================================\n");
+    
+  } else {
+    // RX MODE: Receive packets from secondary via TX rings (default)
+    if (tx_rings.empty()) {
+      std::fprintf(stderr, "[primary-ue] ERROR: No TX rings available\n");
+      return 1;
+    }
 
-  std::fprintf(stderr, "[primary-ue] Monitoring %zu TX ring(s) for incoming IQ samples...\n\n", 
-               tx_rings.size());
-
-  // Get pool for sending response packets
-  rte_mempool* send_pool = pools.empty() ? nullptr : pools[0];
+    std::fprintf(stderr, "[primary-ue] RX MODE: Monitoring %zu TX ring(s) for incoming IQ samples...\n", 
+                 tx_rings.size());
+    std::fprintf(stderr, "[primary-ue] Will receive up to 60 bursts then exit.\n\n");
   
-  // Receive loop - dequeue IQ samples from rings and send responses
+  // Receive loop - just count received packets, no responses
   uint64_t total_samples_received = 0;
   uint64_t total_bursts_received = 0;
-  uint64_t total_samples_sent = 0;
-  uint64_t total_bursts_sent = 0;
-  
-  while (!g_shutdown_requested.load()) {
-    bool received_any = false;
-    
-    // Check each TX ring for data from secondary
-    for (size_t ring_idx = 0; ring_idx < tx_rings.size(); ring_idx++) {
+  const uint64_t max_bursts = 60;
+    while (!g_shutdown_requested.load() && total_bursts_received < max_bursts) {
+      // Check each TX ring for data from secondary
+      for (size_t ring_idx = 0; ring_idx < tx_rings.size(); ring_idx++) {
       rte_ring* ring = tx_rings[ring_idx];
       const unsigned batch_size = 32;
       void* mbufs[batch_size];
@@ -133,7 +182,6 @@ int main(int argc, char** argv) {
       // Try to dequeue a burst of mbufs
       unsigned n = rte_ring_dequeue_burst(ring, mbufs, batch_size, nullptr);
       if (n > 0) {
-        received_any = true;
         total_bursts_received++;
         
         // Process each mbuf
@@ -182,68 +230,29 @@ int main(int argc, char** argv) {
           rte_pktmbuf_free(m);
         }
         
-        if (total_bursts_received % 100 == 0) {
-          std::fprintf(stderr, "[primary-ue] Received %lu IQ samples in %lu bursts\n",
-                      total_samples_received, total_bursts_received);
+        if (total_bursts_received <= 3 || total_bursts_received % 20 == 0) {
+          std::fprintf(stderr, "[primary-ue] Received burst %lu (%lu IQ samples total)\n",
+                      total_bursts_received, total_samples_received);
+        }
+        
+        // Exit early if we hit the limit
+        if (total_bursts_received >= max_bursts) {
+          break;
+        }
         }
       }
-    }
-    
-    // Send response packets back to secondary via RX rings (every 10th receive)
-    if (received_any && send_pool && !rx_rings.empty() && (total_bursts_received % 10 == 0)) {
-      rte_ring* rx_ring = rx_rings[0];
-      const unsigned response_batch = 4;  // Send 4 response mbufs
-      rte_mbuf* response_mbufs[response_batch];
       
-      // Allocate response mbufs
-      if (rte_pktmbuf_alloc_bulk(send_pool, response_mbufs, response_batch) == 0) {
-        // Fill with simple response pattern
-        for (unsigned i = 0; i < response_batch; i++) {
-          rte_mbuf* m = response_mbufs[i];
-          int16_t* data = rte_pktmbuf_mtod(m, int16_t*);
-          
-          // Simple pattern: [burst_num, sample_count, ...]
-          data[0] = static_cast<int16_t>(total_bursts_sent & 0xFFFF);
-          data[1] = static_cast<int16_t>((total_samples_received >> 16) & 0xFFFF);
-          for (int j = 2; j < 64; j++) {
-            data[j] = static_cast<int16_t>(j * 100);
-          }
-          
-          m->data_len = 128;  // 64 int16_t values
-          m->pkt_len = 128;
-        }
-        
-        // Send to RX ring
-        unsigned n_sent = rte_ring_enqueue_burst(rx_ring, reinterpret_cast<void**>(response_mbufs),
-                                                  response_batch, nullptr);
-        
-        if (n_sent > 0) {
-          total_bursts_sent++;
-          total_samples_sent += n_sent * 64;
-          
-          if (total_bursts_sent % 10 == 0) {
-            std::fprintf(stderr, "[primary-ue] Sent %lu response samples in %lu bursts\n",
-                        total_samples_sent, total_bursts_sent);
-          }
-        }
-        
-        // Free unsent mbufs
-        for (unsigned i = n_sent; i < response_batch; i++) {
-          rte_pktmbuf_free(response_mbufs[i]);
-        }
-      }
+      // Small delay to avoid busy-wait
+      usleep(100); // 0.1ms
     }
     
-    // Small delay if no data received to avoid busy-wait
-    if (!received_any) {
-      usleep(1000); // 1ms
-    }
+    std::fprintf(stderr, "\n========================================\n");
+    std::fprintf(stderr, "[primary-ue] RX MODE COMPLETE\n");
+    std::fprintf(stderr, "========================================\n");
+    std::fprintf(stderr, "Total IQ samples received: %lu\n", total_samples_received);
+    std::fprintf(stderr, "Total bursts received: %lu\n", total_bursts_received);
+    std::fprintf(stderr, "========================================\n");
   }
-  
-  std::fprintf(stderr, "\n[primary-ue] Total IQ samples received: %lu\n", total_samples_received);
-  std::fprintf(stderr, "[primary-ue] Total bursts received: %lu\n", total_bursts_received);
-  std::fprintf(stderr, "[primary-ue] Total response samples sent: %lu\n", total_samples_sent);
-  std::fprintf(stderr, "[primary-ue] Total response bursts sent: %lu\n", total_bursts_sent);
 
   std::fprintf(stderr, "\n[primary-ue] Shutting down...\n");
   std::fprintf(stderr, "[primary-ue] Test completed successfully.\n");

@@ -22,7 +22,9 @@ struct rte_mempool;
 
 namespace flexsdr {
 
+// Forward declarations
 enum class Role { UE, GNB };
+class FlexSDRSecondary;
 
 // DPDK-native context (non-owning views of primary-owned objects)
 struct DpdkContext {
@@ -41,6 +43,9 @@ struct DpdkContext {
   rte_ring*    gnb_tx0 = nullptr;
   rte_mempool* ue_mp   = nullptr;
   rte_mempool* gnb_mp  = nullptr;
+  
+  // TxBackend provider (non-owning pointer to FlexSDRSecondary)
+  FlexSDRSecondary* secondary = nullptr;
 };
 
 

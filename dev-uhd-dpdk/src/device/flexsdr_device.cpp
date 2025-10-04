@@ -164,27 +164,17 @@ flexsdr_device::get_tx_stream(const uhd::stream_args_t& args)
     }
   }
 
-  // Choose TX ring/pool by role (prefer context; fall back to arg ring)
-  ::rte_ring*    tx_ring = nullptr;
-  ::rte_mempool* mp      = nullptr;
-  if (p_->ctx) {
-    if (p_->role == Role::UE) { tx_ring = p_->ctx->ue_tx0; mp = p_->ctx->ue_mp; }
-    else                      { tx_ring = p_->ctx->gnb_tx0; mp = p_->ctx->gnb_mp; }
+  // Get backend from context - should be FlexSDRSecondary which implements TxBackend
+  TxBackend* backend = nullptr;
+  if (p_->ctx && p_->ctx->secondary) {
+    backend = p_->ctx->secondary;
   }
-  if (!tx_ring) tx_ring = p_->arg_rx_ring; // legacy emergency fallback
-  if (!tx_ring) {
-    throw std::runtime_error("TX: no DPDK ring attached; call attach_dpdk_context(Role::UE|GNB) or pass ring=<name> in device args");
-  }
-  if (!mp) {
-    throw std::runtime_error("TX: no DPDK mempool attached; set ue_pool_name/gnb_pool_name in context/YAML");
+  
+  if (!backend) {
+    throw std::runtime_error("TX: no TxBackend available; ensure FlexSDRSecondary is attached to context");
   }
 
-  // spp/burst policy (can come from YAML later)
-  const std::size_t spp          = 1024;
-  const unsigned    burst        = 32;
-  const bool        allow_partial= true;
-
-  return std::make_shared<flexsdr_tx_streamer>(tx_ring, mp, spp, burst, allow_partial);
+  return std::make_shared<flexsdr_tx_streamer>(backend);
 }
 
 bool flexsdr_device::recv_async_msg(uhd::async_metadata_t&, double) {

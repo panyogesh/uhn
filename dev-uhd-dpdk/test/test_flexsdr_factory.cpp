@@ -42,6 +42,7 @@ static void signal_handler(int signum) {
 struct Cli {
     std::string cfg  = "conf/configurations-ue.yaml";
     std::string args = "type=flexsdr,addr=127.0.0.1,port=50051";
+    std::string mode = "tx";  // tx, rx, or both
     int hold_secs = 30;
 };
 
@@ -51,6 +52,7 @@ static void usage(const char* prog) {
       << "Options:\n"
       << "  --cfg <yaml>      Configuration file (default: conf/configurations-ue.yaml)\n"
       << "  --args <uhd_args> UHD device args (default: type=flexsdr,addr=127.0.0.1,port=50051)\n"
+      << "  --mode <mode>     Test mode: tx, rx, or both (default: tx)\n"
       << "  --hold <seconds>  How long to run test (default: 30)\n"
       << "  -h, --help       Show this help\n";
 }
@@ -62,6 +64,8 @@ static bool parse_cli(int argc, char** argv, Cli& cli) {
             cli.cfg = argv[++i];
         } else if (a == "--args" && i+1 < argc) {
             cli.args = argv[++i];
+        } else if (a == "--mode" && i+1 < argc) {
+            cli.mode = argv[++i];
         } else if (a == "--hold" && i+1 < argc) {
             cli.hold_secs = std::stoi(argv[++i]);
         } else if (a == "-h" || a == "--help") {
@@ -75,8 +79,105 @@ static bool parse_cli(int argc, char** argv, Cli& cli) {
     return true;
 }
 
+// TX TEST
+void test_tx_transmission(uhd::tx_streamer::sptr tx_stream, int max_bursts) {
+    std::cout << "\n========================================\n";
+    std::cout << "TX TEST: Transmitting IQ samples\n";
+    std::cout << "========================================\n";
+    
+    const size_t num_channels = tx_stream->get_num_channels();
+    const size_t samps_per_buff = 1024;
+    
+    std::cout << "[TX] Channels: " << num_channels << "\n";
+    std::cout << "[TX] Max bursts: " << max_bursts << "\n";
+    std::cout << "[TX] Samples per burst: " << samps_per_buff << "\n\n";
+    
+    // Allocate buffers and generate test tone (complex sinusoid)
+    std::vector<std::vector<std::complex<int16_t>>> buffs(num_channels);
+    std::vector<const void*> buff_ptrs(num_channels);
+    
+    // Generate different tone for each channel
+    for (size_t ch = 0; ch < num_channels; ch++) {
+        buffs[ch].resize(samps_per_buff);
+        const double freq_norm = 0.1 + ch * 0.05;  // Normalized frequency
+        const double amplitude = 8000.0;  // Scale for int16
+        
+        for (size_t i = 0; i < samps_per_buff; i++) {
+            double phase = 2.0 * M_PI * freq_norm * i;
+            buffs[ch][i] = std::complex<int16_t>(
+                static_cast<int16_t>(amplitude * std::cos(phase)),
+                static_cast<int16_t>(amplitude * std::sin(phase))
+            );
+        }
+        buff_ptrs[ch] = buffs[ch].data();
+        
+        std::cout << "[TX] CH" << ch << ": Generated tone at normalized freq " 
+                  << std::fixed << std::setprecision(3) << freq_norm << "\n";
+    }
+    std::cout << "\n";
+    
+    // Statistics
+    uint64_t total_samples = 0;
+    uint64_t total_bursts = 0;
+    uint64_t send_failures = 0;
+    
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_stats = start_time;
+    
+    // Transmit loop
+    uhd::tx_metadata_t md;
+    md.start_of_burst = true;
+    md.end_of_burst = false;
+    md.has_time_spec = false;
+    
+    while (!g_shutdown_requested.load() && total_bursts < static_cast<uint64_t>(max_bursts)) {
+        // Send burst
+        size_t n = tx_stream->send(buff_ptrs, samps_per_buff, md, 0.1);
+        
+        if (n == samps_per_buff) {
+            total_samples += n;
+            total_bursts++;
+            
+            // Display progress
+            if (total_bursts <= 3 || total_bursts % 20 == 0) {
+                std::cout << "[TX] Burst " << total_bursts << ": " << n << " samples sent\n";
+            }
+        } else {
+            send_failures++;
+            if (send_failures % 100 == 1) {
+                std::cerr << "[TX] WARNING: Partial send (" << n << "/" << samps_per_buff << ")\n";
+            }
+        }
+        
+        // Clear start_of_burst after first packet
+        if (md.start_of_burst) {
+            md.start_of_burst = false;
+        }
+        
+        // Small delay to avoid overwhelming
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    
+    // Send end of burst
+    md.end_of_burst = true;
+    tx_stream->send(buff_ptrs, 0, md, 0.1);
+    
+    auto total_time = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start_time).count();
+    
+    std::cout << "\n========================================\n";
+    std::cout << "TX TEST SUMMARY\n";
+    std::cout << "Duration: " << std::fixed << std::setprecision(2) << total_time << " s\n";
+    std::cout << "Samples: " << total_samples << "\n";
+    std::cout << "Bursts: " << total_bursts << "\n";
+    std::cout << "Failures: " << send_failures << "\n";
+    std::cout << "Throughput: " << std::fixed << std::setprecision(2) 
+              << (total_samples / 1e6) / total_time << " Msps\n";
+    std::cout << "========================================\n\n";
+}
+
 // RX TEST
-void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int duration_sec) {
+void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int max_bursts) {
     std::cout << "\n========================================\n";
     std::cout << "RX TEST: Receiving IQ samples\n";
     std::cout << "========================================\n";
@@ -85,7 +186,7 @@ void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int duration_sec) {
     const size_t samps_per_buff = 4096;
     
     std::cout << "[RX] Channels: " << num_channels << "\n";
-    std::cout << "[RX] Duration: " << duration_sec << " seconds\n\n";
+    std::cout << "[RX] Max bursts: " << max_bursts << "\n\n";
     
     // Allocate buffers
     std::vector<std::vector<std::complex<int16_t>>> buffs(num_channels);
@@ -111,14 +212,9 @@ void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int duration_sec) {
     auto last_stats = start_time;
     
     // Receive loop
-    while (!g_shutdown_requested.load()) {
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
-        
-        if (elapsed >= duration_sec) break;
-        
+    while (!g_shutdown_requested.load() && total_bursts < static_cast<uint64_t>(max_bursts)) {
         uhd::rx_metadata_t md;
-        size_t n = rx_stream->recv(buff_ptrs, samps_per_buff, md, 0.1);
+        size_t n = rx_stream->recv(buff_ptrs, samps_per_buff, md, 1.0);
         
         if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
             timeout_count++;
@@ -129,26 +225,16 @@ void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int duration_sec) {
             total_samples += n;
             total_bursts++;
             
-            // Display first 3 bursts with sample details
-            if (total_bursts <= 3) {
+            // Display progress
+            if (total_bursts <= 3 || total_bursts % 20 == 0) {
                 std::cout << "[RX] Burst " << total_bursts << ": " << n << " samples received\n";
-                std::cout << "[RX] First 8 samples from each channel:\n";
-                for (size_t ch = 0; ch < num_channels; ch++) {
-                    std::cout << "  CH" << ch << ": ";
-                    for (size_t i = 0; i < std::min(size_t(8), n); i++) {
-                        std::cout << "(" << buffs[ch][i].real() << "," << buffs[ch][i].imag() << ") ";
+                if (total_bursts <= 3) {
+                    std::cout << "[RX] First 4 samples CH0: ";
+                    for (size_t i = 0; i < std::min(size_t(4), n); i++) {
+                        std::cout << "(" << buffs[0][i].real() << "," << buffs[0][i].imag() << ") ";
                     }
                     std::cout << "\n";
                 }
-                std::cout << "\n";
-                first_displayed = true;
-            }
-            
-            auto stats_elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_stats).count();
-            if (stats_elapsed >= 5) {
-                std::cout << "[RX] @ " << elapsed << "s: " << total_samples 
-                          << " samples, " << total_bursts << " bursts\n";
-                last_stats = now;
             }
         }
     }
@@ -240,23 +326,49 @@ int main(int argc, char** argv) {
         // Create DPDK context and attach
         auto ctx = std::make_shared<flexsdr::DpdkContext>();
         
-        // Get first RX ring from secondary
+        // Get rings/pools from secondary
         ctx->ue_in = secondary->rx_ring_for_queue(0);
         ctx->ue_tx0 = secondary->tx_ring_for_queue(0);
         ctx->ue_mp = secondary->pool_for_queue(0);
         
+        // IMPORTANT: Attach secondary as TxBackend provider
+        ctx->secondary = secondary.get();
+        
         fdev->attach_dpdk_context(ctx, flexsdr::Role::UE);
         std::cout << "[UHD] Device created\n\n";
 
-        // Create RX stream
-        uhd::stream_args_t sargs("sc16", "sc16");
-        sargs.channels = {0,1,2,3};
-        auto rx = fdev->get_rx_stream(sargs);
+        // Create streams
+        uhd::stream_args_t rx_args("sc16", "sc16");
+        rx_args.channels = {0,1,2,3};
+        auto rx = fdev->get_rx_stream(rx_args);
         
-        std::cout << "[STREAMS] RX: " << rx->get_num_channels() << " channels\n\n";
+        uhd::stream_args_t tx_args("sc16", "sc16");
+        tx_args.channels = {0};  // Single channel for TX test
+        auto tx = fdev->get_tx_stream(tx_args);
+        
+        std::cout << "[STREAMS] RX: " << rx->get_num_channels() << " channels\n";
+        std::cout << "[STREAMS] TX: " << tx->get_num_channels() << " channels\n\n";
 
-        // Run RX test
-        test_rx_reception(rx, cli.hold_secs);
+        // Run test based on mode
+        if (cli.mode == "tx") {
+            std::cout << "[INFO] Running TX test - sending 60 bursts to primary\n\n";
+            test_tx_transmission(tx, 60);
+            std::cout << "\n[INFO] TX test complete.\n";
+        } else if (cli.mode == "rx") {
+            std::cout << "[INFO] Running RX test - receiving 60 bursts from primary\n\n";
+            test_rx_reception(rx, 60);
+            std::cout << "\n[INFO] RX test complete.\n";
+        } else if (cli.mode == "both") {
+            std::cout << "[INFO] Running both TX and RX tests\n\n";
+            test_tx_transmission(tx, 60);
+            std::cout << "\n[INFO] Waiting 1 second...\n";
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            test_rx_reception(rx, 60);
+            std::cout << "\n[INFO] Both tests complete.\n";
+        } else {
+            std::cerr << "[ERROR] Invalid mode: " << cli.mode << " (use tx, rx, or both)\n";
+            return 5;
+        }
 
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] " << e.what() << "\n";

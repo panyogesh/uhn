@@ -47,8 +47,8 @@ defaults:
 # but only LOOKS UP the interconnect rings (which are created by Primary-GNB).
 primary-ue:
   pools:
-    - { name: "ue_inbound_pool",  n: 8192, elt_size: 2048, cache: 256 }
-    - { name: "ue_outbound_pool", n: 8192, elt_size: 2048, cache: 256 }
+    - { name: "ue_inbound_pool",  n: 8192, elt_size: 8192, cache: 256 }
+    - { name: "ue_outbound_pool", n: 8192, elt_size: 8192, cache: 256 }
 
   tx_stream:
     <<: *TX_DEFAULT

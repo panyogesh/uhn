@@ -1,8 +1,4 @@
 #pragma once
-extern "C" {
-#include <rte_ring.h>
-#include <rte_mempool.h>
-}
 #include <uhd/stream.hpp>
 #include <uhd/types/metadata.hpp>
 
@@ -11,28 +7,34 @@ extern "C" {
 #include <memory>
 #include <atomic>
 
-// DPDK forward decls to avoid heavy includes in headers
+// Forward declarations for DPDK types
 struct rte_ring;
 struct rte_mempool;
 
 namespace flexsdr {
+
+struct TxBackend {
+  virtual ~TxBackend() = default;
+  // Sends one channel burst; returns true if fully enqueued.
+  // 'data' is the raw IQ payload for this channel (already interleaved/planar as configured).
+  virtual bool send_burst(std::size_t chan,
+                          const void* data,
+                          std::size_t bytes,
+                          uint64_t tsf,
+                         uint32_t spp,
+                          uint16_t fmt,
+                          bool sob,
+                          bool eob) = 0;
+};
+
 /// Minimal UHD TX streamer that forwards SC16 interleaved samples to a DPDK ring
 /// via dpdk_egress. This satisfies the UHD API and lets apps call send().
 class flexsdr_tx_streamer final : public uhd::tx_streamer {
 public:
     using buffs_type = uhd::tx_streamer::buffs_type;
 
-   // DPDK-native ctor (preferred)
-    explicit flexsdr_tx_streamer(
-        rte_ring* tx_ring,
-        rte_mempool* pool,
-        std::size_t spp      = 1024,   // samples per packet (default)
-        unsigned    burst    = 32,     // mbufs per burst
-        bool        allow_partial = true
-    );
-
-    // (Optional) keep the old ctor if other code still uses it
-    flexsdr_tx_streamer() = default;
+    // Constructor that accepts a backend
+    explicit flexsdr_tx_streamer(TxBackend *backend) : backend_(backend) {}
 
     ~flexsdr_tx_streamer() override = default;
 
@@ -54,9 +56,7 @@ public:
         const size_t ) override {};
 
 private:
-    // Raw DPDK handles (non-owning)
-    rte_ring*    tx_ring_ = nullptr;
-    rte_mempool* pool_    = nullptr;
+    TxBackend* backend_ = nullptr; // non-owning
 
    // Basic TX parameters
     std::size_t spp_   = 1024;
