@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 
 #include <rte_mbuf.h>
 #include <rte_ring.h>
@@ -59,7 +61,6 @@ size_t flexsdr_rx_streamer::recv(
     const double timeout,
     const bool one_packet)
 {
-  (void)timeout;  // TODO: Implement timeout
   (void)one_packet;
   
   if (!opt_.ring) {
@@ -72,17 +73,76 @@ size_t flexsdr_rx_streamer::recv(
     return 0;
   }
   
-  // Dequeue burst of mbufs from DPDK ring
+  // Poll the ring repeatedly until data is available or timeout expires
   void* mbuf_ptrs[opt_.burst_size];
-  unsigned n_dequeued = rte_ring_dequeue_burst(
-      opt_.ring,
-      mbuf_ptrs,
-      opt_.burst_size,
-      nullptr);
+  unsigned n_dequeued = 0;
+  
+  // Calculate timeout in microseconds for polling
+  const auto timeout_us = static_cast<uint64_t>(timeout * 1e6);
+  const auto start_time = std::chrono::steady_clock::now();
+  
+  // Optimized polling strategy:
+  // 1. Tight busy-poll for fast path (first ~1000 attempts)
+  // 2. Check timeout periodically (every 1000 iterations)
+  // 3. Small sleep only after many failed attempts
+  // 4. Aggressive ring draining with multiple dequeue attempts
+  
+  uint64_t poll_attempts = 0;
+  const uint64_t TIGHT_POLL_LIMIT = 1000;       // Busy-poll this many times
+  const uint64_t TIMEOUT_CHECK_INTERVAL = 1000; // Check timeout every N iterations
+  const unsigned MAX_DRAIN_ATTEMPTS = 4;        // Try to drain ring this many times
+  
+  // Poll loop - keep trying to dequeue until we get data or timeout
+  while (n_dequeued == 0 && running_.load()) {
+    poll_attempts++;
+    
+    // Aggressive ring draining - try multiple dequeues to empty the ring
+    for (unsigned drain = 0; drain < MAX_DRAIN_ATTEMPTS && n_dequeued < opt_.burst_size; drain++) {
+      unsigned n = rte_ring_dequeue_burst(
+          opt_.ring,
+          &mbuf_ptrs[n_dequeued],
+          opt_.burst_size - n_dequeued,
+          nullptr);
+      
+      n_dequeued += n;
+      
+      // If we got some data, continue draining
+      if (n > 0) {
+        continue;
+      }
+      
+      // No data on this attempt, break out of drain loop
+      break;
+    }
+    
+    if (n_dequeued > 0) {
+      break;  // Got data!
+    }
+    
+    // Check timeout periodically (not every iteration - too expensive)
+    if (poll_attempts % TIMEOUT_CHECK_INTERVAL == 0) {
+      auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - start_time);
+      
+      if (elapsed.count() >= static_cast<int64_t>(timeout_us)) {
+        // Timeout expired
+        underruns_++;
+        metadata.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
+        return 0;
+      }
+    }
+    
+    // Sleep strategy: tight polling initially, then small sleeps
+    if (poll_attempts > TIGHT_POLL_LIMIT) {
+      // Only sleep after many failed attempts (reduces latency)
+      // Use 1us sleep instead of 10us for better responsiveness
+      std::this_thread::sleep_for(std::chrono::microseconds(1));
+    }
+    // else: tight busy-poll (no sleep) for fast path
+  }
   
   if (n_dequeued == 0) {
-    // No data available
-    underruns_++;
+    // Still no data (stream was stopped)
     metadata.error_code = uhd::rx_metadata_t::ERROR_CODE_TIMEOUT;
     return 0;
   }

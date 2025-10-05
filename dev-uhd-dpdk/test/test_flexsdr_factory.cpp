@@ -30,6 +30,26 @@ extern "C" {
 #include "transport/eal_bootstrap.hpp"
 #include "device/flexsdr_device.hpp"
 
+/**
+ * NOTE: Interconnect Architecture
+ * 
+ * This test runs as a SECONDARY 'ue' process, which means:
+ * - It accesses LOCAL TX/RX rings (ue_tx_ch1, ue_inbound_ring, etc.)
+ * - It does NOT directly access INTERCONNECT rings (pg_to_pu, pu_to_pg)
+ * 
+ * The interconnect rings are used for PRIMARY-to-PRIMARY communication:
+ * - Primary-GNB creates interconnect rings (pg_to_pu, pu_to_pg)
+ * - Primary-UE looks up and uses these interconnect rings
+ * - Secondary processes (like this test) communicate with their primary via local rings
+ * 
+ * For this test to work with interconnect:
+ * 1. Start Primary-GNB first (creates interconnect + handles GNB side)
+ * 2. Start Primary-UE second (lookups interconnect + handles UE side)  
+ * 3. Run this test as Secondary-UE (communicates with Primary-UE via local rings)
+ * 
+ * The primary processes handle the interconnect traffic switching internally.
+ */
+
 // Global shutdown flag
 static std::atomic<bool> g_shutdown_requested{false};
 
@@ -43,7 +63,7 @@ struct Cli {
     std::string cfg  = "conf/configurations-ue.yaml";
     std::string args = "type=flexsdr,addr=127.0.0.1,port=50051";
     std::string mode = "tx";  // tx, rx, or both
-    int hold_secs = 30;
+    int hold_secs = 120;
 };
 
 static void usage(const char* prog) {
@@ -53,7 +73,7 @@ static void usage(const char* prog) {
       << "  --cfg <yaml>      Configuration file (default: conf/configurations-ue.yaml)\n"
       << "  --args <uhd_args> UHD device args (default: type=flexsdr,addr=127.0.0.1,port=50051)\n"
       << "  --mode <mode>     Test mode: tx, rx, or both (default: tx)\n"
-      << "  --hold <seconds>  How long to run test (default: 30)\n"
+      << "  --hold <seconds>  How long to run test (default: 180)\n"
       << "  -h, --help       Show this help\n";
 }
 
@@ -177,7 +197,7 @@ void test_tx_transmission(uhd::tx_streamer::sptr tx_stream, int max_bursts) {
 }
 
 // RX TEST
-void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int max_bursts) {
+void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int max_bursts, double timeout_secs = 180.0) {
     std::cout << "\n========================================\n";
     std::cout << "RX TEST: Receiving IQ samples\n";
     std::cout << "========================================\n";
@@ -186,7 +206,8 @@ void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int max_bursts) {
     const size_t samps_per_buff = 4096;
     
     std::cout << "[RX] Channels: " << num_channels << "\n";
-    std::cout << "[RX] Max bursts: " << max_bursts << "\n\n";
+    std::cout << "[RX] Max bursts: " << max_bursts << "\n";
+    std::cout << "[RX] Timeout: " << timeout_secs << " seconds\n\n";
     
     // Allocate buffers
     std::vector<std::vector<std::complex<int16_t>>> buffs(num_channels);
@@ -200,7 +221,8 @@ void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int max_bursts) {
     uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
     cmd.stream_now = true;
     rx_stream->issue_stream_cmd(cmd);
-    std::cout << "[RX] Stream started\n\n";
+    std::cout << "[RX] Stream started\n";
+    std::cout << "[RX] Waiting for up to " << timeout_secs << " seconds or " << max_bursts << " packets...\n\n";
     
     // Statistics
     uint64_t total_samples = 0;
@@ -211,8 +233,17 @@ void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int max_bursts) {
     auto start_time = std::chrono::steady_clock::now();
     auto last_stats = start_time;
     
-    // Receive loop
+    // Receive loop - exit on max_bursts OR timeout
     while (!g_shutdown_requested.load() && total_bursts < static_cast<uint64_t>(max_bursts)) {
+        // Check if we've exceeded the timeout
+        auto elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start_time).count();
+        if (elapsed >= timeout_secs) {
+            std::cout << "\n[RX] Timeout reached (" << std::fixed << std::setprecision(1) 
+                      << elapsed << "s), stopping...\n";
+            break;
+        }
+        
         uhd::rx_metadata_t md;
         size_t n = rx_stream->recv(buff_ptrs, samps_per_buff, md, 1.0);
         
@@ -227,7 +258,11 @@ void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int max_bursts) {
             
             // Display progress
             if (total_bursts <= 3 || total_bursts % 20 == 0) {
-                std::cout << "[RX] Burst " << total_bursts << ": " << n << " samples received\n";
+                auto elapsed_now = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - start_time).count();
+                std::cout << "[RX] Burst " << total_bursts << "/" << max_bursts 
+                          << " (" << std::fixed << std::setprecision(1) << elapsed_now << "s): " 
+                          << n << " samples received\n";
                 if (total_bursts <= 3) {
                     std::cout << "[RX] First 4 samples CH0: ";
                     for (size_t i = 0; i < std::min(size_t(4), n); i++) {
@@ -250,7 +285,11 @@ void test_rx_reception(uhd::rx_streamer::sptr rx_stream, int max_bursts) {
     std::cout << "RX TEST SUMMARY\n";
     std::cout << "Duration: " << std::fixed << std::setprecision(2) << total_time << " s\n";
     std::cout << "Samples: " << total_samples << "\n";
-    std::cout << "Bursts: " << total_bursts << "\n";
+    std::cout << "Bursts: " << total_bursts << "/" << max_bursts;
+    if (total_bursts < static_cast<uint64_t>(max_bursts)) {
+        std::cout << " (timeout)";
+    }
+    std::cout << "\n";
     std::cout << "Throughput: " << std::fixed << std::setprecision(2) 
               << (total_samples / 1e6) / total_time << " Msps\n";
     std::cout << "========================================\n\n";
@@ -350,21 +389,76 @@ int main(int argc, char** argv) {
         std::cout << "[STREAMS] TX: " << tx->get_num_channels() << " channels\n\n";
 
         // Run test based on mode
+        const int TARGET_PACKETS = 400;  // Target packets in each direction
+        
         if (cli.mode == "tx") {
-            std::cout << "[INFO] Running TX test - sending 60 bursts to primary\n\n";
-            test_tx_transmission(tx, 60);
+            std::cout << "[INFO] Running TX test - sending " << TARGET_PACKETS << " bursts to primary\n\n";
+            test_tx_transmission(tx, TARGET_PACKETS);
             std::cout << "\n[INFO] TX test complete.\n";
         } else if (cli.mode == "rx") {
-            std::cout << "[INFO] Running RX test - receiving 60 bursts from primary\n\n";
-            test_rx_reception(rx, 60);
+            std::cout << "[INFO] Running RX test - receiving " << TARGET_PACKETS << " bursts from primary\n\n";
+            test_rx_reception(rx, TARGET_PACKETS);
             std::cout << "\n[INFO] RX test complete.\n";
         } else if (cli.mode == "both") {
-            std::cout << "[INFO] Running both TX and RX tests\n\n";
-            test_tx_transmission(tx, 60);
-            std::cout << "\n[INFO] Waiting 1 second...\n";
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            test_rx_reception(rx, 60);
-            std::cout << "\n[INFO] Both tests complete.\n";
+            std::cout << "[INFO] Running full bidirectional test (400 packets each direction)\n\n";
+            
+            // Start RX stream FIRST so it's ready to receive looped packets
+            std::cout << "[INFO] Step 1: Starting RX stream and preparing to receive...\n";
+            uhd::stream_cmd_t cmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+            cmd.stream_now = true;
+            rx->issue_stream_cmd(cmd);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));  // Let RX stream initialize
+            
+            // Start RX reception in background thread
+            std::atomic<bool> rx_done{false};
+            std::atomic<uint64_t> rx_packets_received{0};
+            std::thread rx_thread([&]() {
+                std::vector<std::vector<std::complex<int16_t>>> buffs(4);
+                std::vector<void*> buff_ptrs(4);
+                for (size_t ch = 0; ch < 4; ch++) {
+                    buffs[ch].resize(4096);
+                    buff_ptrs[ch] = buffs[ch].data();
+                }
+                
+                while (!rx_done.load() && rx_packets_received.load() < TARGET_PACKETS) {
+                    uhd::rx_metadata_t md;
+                    size_t n = rx->recv(buff_ptrs, 4096, md, 0.1);
+                    if (n > 0) {
+                        rx_packets_received++;
+                    }
+                }
+            });
+            
+            // Small delay to ensure RX thread is polling
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            
+            std::cout << "[INFO] Step 2: Sending " << TARGET_PACKETS << " bursts to primary (will be looped back)...\n";
+            test_tx_transmission(tx, TARGET_PACKETS);
+            
+            // Wait for RX to complete (or timeout after 10 seconds)
+            std::cout << "[INFO] Step 3: Waiting for RX to receive looped packets...\n";
+            auto rx_start = std::chrono::steady_clock::now();
+            while (rx_packets_received.load() < TARGET_PACKETS) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - rx_start).count();
+                if (elapsed > 10) {
+                    std::cout << "[INFO] RX timeout after 10s, received " << rx_packets_received.load() << "/" << TARGET_PACKETS << " packets\n";
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (rx_packets_received.load() % 100 == 0 && rx_packets_received.load() > 0) {
+                    std::cout << "[INFO] RX progress: " << rx_packets_received.load() << "/" << TARGET_PACKETS << " packets\n";
+                }
+            }
+            
+            rx_done.store(true);
+            rx_thread.join();
+            
+            // Stop RX stream
+            cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
+            rx->issue_stream_cmd(cmd);
+            
+            std::cout << "\n[INFO] Both tests complete. TX: 400 packets sent, RX: " << rx_packets_received.load() << " packets received\n";
         } else {
             std::cerr << "[ERROR] Invalid mode: " << cli.mode << " (use tx, rx, or both)\n";
             return 5;

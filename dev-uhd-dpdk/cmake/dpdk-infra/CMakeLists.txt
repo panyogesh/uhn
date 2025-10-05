@@ -248,8 +248,125 @@ set_target_properties(testcase_secondary_dpdk_infra PROPERTIES
 
 apply_dpdk_isa(testcase_secondary_dpdk_infra)
 
+# Interconnect Test (GNB/UE)
+add_executable(testcase_interconnect_dpdk_infra
+  "${CMAKE_SOURCE_DIR}/testcase_interconnect_dpdk_infra.cpp"
+)
+
+target_include_directories(testcase_interconnect_dpdk_infra PRIVATE
+  "${REPO_ROOT}/include"
+  ${DPDK_INCLUDE_DIRS}
+)
+
+target_link_options(testcase_interconnect_dpdk_infra PRIVATE -Wl,--no-as-needed -rdynamic)
+
+target_compile_options(testcase_interconnect_dpdk_infra PRIVATE
+  -Wall -Wextra -Wno-pedantic -Wno-unused-parameter
+  -g -O1 -fno-omit-frame-pointer
+)
+
+if(ENABLE_ASAN)
+  target_compile_options(testcase_interconnect_dpdk_infra PRIVATE -fsanitize=address)
+  target_link_options(testcase_interconnect_dpdk_infra PRIVATE -fsanitize=address)
+endif()
+
+target_link_libraries(testcase_interconnect_dpdk_infra
+  PRIVATE
+    flexsdr_eal
+    flexsdr_primary
+    flexsdr_conf
+    yaml-cpp
+    ${DPDK_LIBS_SANITIZED}
+    Threads::Threads
+)
+
+set_target_properties(testcase_interconnect_dpdk_infra PROPERTIES
+  BUILD_RPATH   "${DPDK_LIBRARY_DIRS}"
+  INSTALL_RPATH "${DPDK_LIBRARY_DIRS}"
+)
+
+apply_dpdk_isa(testcase_interconnect_dpdk_infra)
+
+# Traffic Switch Test (Unified Single Primary)
+add_executable(testcase_traffic_switch
+  "${CMAKE_SOURCE_DIR}/testcase_traffic_switch.cpp"
+)
+
+target_include_directories(testcase_traffic_switch PRIVATE
+  "${REPO_ROOT}/include"
+  ${DPDK_INCLUDE_DIRS}
+)
+
+target_link_options(testcase_traffic_switch PRIVATE -Wl,--no-as-needed -rdynamic)
+
+target_compile_options(testcase_traffic_switch PRIVATE
+  -Wall -Wextra -Wno-pedantic -Wno-unused-parameter
+  -g -O1 -fno-omit-frame-pointer
+)
+
+if(ENABLE_ASAN)
+  target_compile_options(testcase_traffic_switch PRIVATE -fsanitize=address)
+  target_link_options(testcase_traffic_switch PRIVATE -fsanitize=address)
+endif()
+
+target_link_libraries(testcase_traffic_switch
+  PRIVATE
+    flexsdr_eal
+    flexsdr_primary
+    flexsdr_conf
+    yaml-cpp
+    ${DPDK_LIBS_SANITIZED}
+    Threads::Threads
+)
+
+set_target_properties(testcase_traffic_switch PROPERTIES
+  BUILD_RPATH   "${DPDK_LIBRARY_DIRS}"
+  INSTALL_RPATH "${DPDK_LIBRARY_DIRS}"
+)
+
+apply_dpdk_isa(testcase_traffic_switch)
+
+# Primary UE Loopback Test (for test_flexsdr_factory)
+add_executable(testcase_primary_ue_loopback
+  "${CMAKE_SOURCE_DIR}/testcase_primary_ue_loopback.cpp"
+)
+
+target_include_directories(testcase_primary_ue_loopback PRIVATE
+  "${REPO_ROOT}/include"
+  ${DPDK_INCLUDE_DIRS}
+)
+
+target_link_options(testcase_primary_ue_loopback PRIVATE -Wl,--no-as-needed -rdynamic)
+
+target_compile_options(testcase_primary_ue_loopback PRIVATE
+  -Wall -Wextra -Wno-pedantic -Wno-unused-parameter
+  -g -O1 -fno-omit-frame-pointer
+)
+
+if(ENABLE_ASAN)
+  target_compile_options(testcase_primary_ue_loopback PRIVATE -fsanitize=address)
+  target_link_options(testcase_primary_ue_loopback PRIVATE -fsanitize=address)
+endif()
+
+target_link_libraries(testcase_primary_ue_loopback
+  PRIVATE
+    flexsdr_eal
+    flexsdr_primary
+    flexsdr_conf
+    yaml-cpp
+    ${DPDK_LIBS_SANITIZED}
+    Threads::Threads
+)
+
+set_target_properties(testcase_primary_ue_loopback PROPERTIES
+  BUILD_RPATH   "${DPDK_LIBRARY_DIRS}"
+  INSTALL_RPATH "${DPDK_LIBRARY_DIRS}"
+)
+
+apply_dpdk_isa(testcase_primary_ue_loopback)
+
 # ---------- Warnings ----------
-foreach(tgt IN ITEMS flexsdr_conf flexsdr_eal flexsdr_primary flexsdr_secondary test_dpdk_infra testcase_primary_dpdk_infra testcase_secondary_dpdk_infra)
+foreach(tgt IN ITEMS flexsdr_conf flexsdr_eal flexsdr_primary flexsdr_secondary test_dpdk_infra testcase_primary_dpdk_infra testcase_secondary_dpdk_infra testcase_interconnect_dpdk_infra testcase_traffic_switch testcase_primary_ue_loopback)
   if(TARGET ${tgt})
     target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wno-pedantic -Wno-unused-parameter)
   endif()

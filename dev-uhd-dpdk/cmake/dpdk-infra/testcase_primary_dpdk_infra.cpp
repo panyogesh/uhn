@@ -168,11 +168,11 @@ int main(int argc, char** argv) {
                  tx_rings.size());
     std::fprintf(stderr, "[primary-ue] Will receive up to 60 bursts then exit.\n\n");
   
-  // Receive loop - just count received packets, no responses
+  // Receive loop - count received packets and prepare to respond
   uint64_t total_samples_received = 0;
   uint64_t total_bursts_received = 0;
-  const uint64_t max_bursts = 60;
-    while (!g_shutdown_requested.load() && total_bursts_received < max_bursts) {
+  const uint64_t max_bursts_to_receive = 60;
+    while (!g_shutdown_requested.load() && total_bursts_received < max_bursts_to_receive) {
       // Check each TX ring for data from secondary
       for (size_t ring_idx = 0; ring_idx < tx_rings.size(); ring_idx++) {
       rte_ring* ring = tx_rings[ring_idx];
@@ -236,7 +236,7 @@ int main(int argc, char** argv) {
         }
         
         // Exit early if we hit the limit
-        if (total_bursts_received >= max_bursts) {
+        if (total_bursts_received >= max_bursts_to_receive) {
           break;
         }
         }
@@ -247,10 +247,67 @@ int main(int argc, char** argv) {
     }
     
     std::fprintf(stderr, "\n========================================\n");
-    std::fprintf(stderr, "[primary-ue] RX MODE COMPLETE\n");
+    std::fprintf(stderr, "[primary-ue] VERIFICATION COMPLETE\n");
     std::fprintf(stderr, "========================================\n");
     std::fprintf(stderr, "Total IQ samples received: %lu\n", total_samples_received);
     std::fprintf(stderr, "Total bursts received: %lu\n", total_bursts_received);
+    
+    // Verify we received 60 packets
+    if (total_bursts_received == 60) {
+      std::fprintf(stderr, "[primary-ue] ✓ Verified: Received expected 60 packets\n");
+    } else {
+      std::fprintf(stderr, "[primary-ue] ✗ WARNING: Expected 60 packets but received %lu\n", 
+                  total_bursts_received);
+    }
+    std::fprintf(stderr, "========================================\n\n");
+    
+    // Now send 65 packets back to secondary via RX rings
+    if (rx_rings.empty() || pools.empty()) {
+      std::fprintf(stderr, "[primary-ue] ERROR: No RX rings or pools available to send response\n");
+      return 1;
+    }
+    
+    std::fprintf(stderr, "[primary-ue] Sending 65 response packets to secondary...\n\n");
+    
+    rte_ring* rx_ring = rx_rings[0];
+    rte_mempool* pool = pools[0];
+    const uint64_t response_bursts = 65;
+    uint64_t total_sent = 0;
+    
+    for (uint64_t burst = 1; burst <= response_bursts && !g_shutdown_requested.load(); burst++) {
+      rte_mbuf* m = rte_pktmbuf_alloc(pool);
+      if (!m) {
+        std::fprintf(stderr, "[primary-ue] ERROR: Failed to allocate mbuf for response\n");
+        break;
+      }
+      
+      // Fill with test pattern (response data)
+      int16_t* data = rte_pktmbuf_mtod(m, int16_t*);
+      for (int i = 0; i < 512; i++) {
+        data[i*2] = (int16_t)(burst * 200 + i);  // I (different pattern from received)
+        data[i*2+1] = (int16_t)(burst * 200 + i + 1);  // Q
+      }
+      m->data_len = 2048;  // 512 IQ samples
+      m->pkt_len = 2048;
+      
+      // Send to RX ring (which secondary reads from)
+      unsigned n = rte_ring_enqueue_burst(rx_ring, reinterpret_cast<void**>(&m), 1, nullptr);
+      if (n > 0) {
+        total_sent++;
+        if (burst <= 3 || burst % 20 == 0) {
+          std::fprintf(stderr, "[primary-ue] Sent response burst %lu\n", burst);
+        }
+      } else {
+        rte_pktmbuf_free(m);
+        std::fprintf(stderr, "[primary-ue] WARNING: Ring full, failed to send response burst %lu\n", burst);
+      }
+      
+      usleep(1000);  // 1ms delay between bursts
+    }
+    
+    std::fprintf(stderr, "\n========================================\n");
+    std::fprintf(stderr, "[primary-ue] RESPONSE SENDING COMPLETE\n");
+    std::fprintf(stderr, "Total response bursts sent: %lu\n", total_sent);
     std::fprintf(stderr, "========================================\n");
   }
 

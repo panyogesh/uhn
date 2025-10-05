@@ -1,0 +1,51 @@
+# =========================
+# Unified FlexSDR Config (Single Primary Process)
+# =========================
+eal:
+  file_prefix: "flexsdr-app"
+  huge_dir: "/dev/hugepages"
+  socket_mem: "512,512"
+  no_pci: true
+  iova: "va"
+
+defaults:
+  role: primary-gnb
+  nb_mbuf: 8192
+  mp_cache: 256
+  ring_size: 512
+  data_format: cs16
+
+  tx_stream:
+    mode: interleaved
+    num_channels: 2
+    allow_partial: true
+    timeout_us: 10
+    busy_poll: true
+    rings: []
+
+  rx_stream:
+    mode: interleaved
+    num_channels: 4
+    allow_partial: true
+    timeout_us: 10
+    busy_poll: true
+    rings: []
+
+# Primary process creates ALL rings (both GNB and UE)
+primary-gnb:
+  pools:
+    - { name: "gnb_inbound_pool",  n: 8192, elt_size: 4096, cache: 256 }
+    - { name: "gnb_outbound_pool", n: 8192, elt_size: 4096, cache: 256 }
+    - { name: "ue_inbound_pool",   n: 8192, elt_size: 4096, cache: 256 }
+    - { name: "ue_outbound_pool",  n: 8192, elt_size: 4096, cache: 256 }
+    - { name: "interconnect_pool", n: 8192, elt_size: 4096, cache: 256 }
+
+  tx_stream:
+    rings:
+      - { name: "gnb_tx_ch1", size: 512 }
+      - { name: "ue_tx_ch1",  size: 512 }
+
+  rx_stream:
+    rings:
+      - { name: "gnb_inbound_ring", size: 512 }
+      - { name: "ue_inbound_ring",  size: 512 }

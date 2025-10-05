@@ -24,7 +24,6 @@ defaults:
     busy_poll: true
     rings: &TX_RINGS
       - { name: "gnb_tx_ch1",       size: 512 }
-      - { name: "gnb_tx_ch2",       size: 512 }
 
   rx_stream: &RX_DEFAULT
     mode: interleaved

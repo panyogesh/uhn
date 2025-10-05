@@ -90,6 +90,16 @@ int FlexSDRPrimary::init_resources() {
   // 3) RX rings
   if (int rc = create_rings_rx_(); rc) return rc;
 
+  // 4) Interconnect rings (role-specific)
+  // Note: FlexSDRPrimary is always a primary process, so:
+  //  - role "gnb" in FlexSDRPrimary => acts as primary-gnb (creates interconnect)
+  //  - role "ue" in FlexSDRPrimary => acts as primary-ue (looks up interconnect)
+  if (cfg_.defaults.role == conf::Role::PrimaryGnb || cfg_.defaults.role == conf::Role::Gnb) {
+    if (int rc = create_interconnect_(); rc) return rc;
+  } else if (cfg_.defaults.role == conf::Role::PrimaryUe || cfg_.defaults.role == conf::Role::Ue) {
+    if (int rc = lookup_interconnect_(); rc) return rc;
+  }
+
   return 0;
 }
 
@@ -176,6 +186,111 @@ int FlexSDRPrimary::create_rings_rx_() {
                  r.name.c_str(), rte_ring_get_size(ptr));
     rx_rings_.push_back(ptr);
   }
+  return 0;
+}
+
+int FlexSDRPrimary::lookup_ring_(const std::string& name, rte_ring** out) {
+  *out = nullptr;
+  rte_ring* r = rte_ring_lookup(name.c_str());
+  if (!r) {
+    std::fprintf(stderr, "[ring] lookup failed: %s rte_errno=%d (%s)\n",
+                 name.c_str(), rte_errno, rte_strerror(rte_errno));
+    return -1;
+  }
+  *out = r;
+  return 0;
+}
+
+// Create interconnect rings (primary-gnb only)
+int FlexSDRPrimary::create_interconnect_() {
+  std::fprintf(stderr, "[primary] creating interconnect rings...\n");
+  
+  // Get interconnect ring specs from config
+  const std::vector<conf::RingSpec>* ic_rings = nullptr;
+  if (cfg_.primary_gnb.has_value() && cfg_.primary_gnb->interconnect.has_value()) {
+    ic_rings = &cfg_.primary_gnb->interconnect->rings;
+  }
+  
+  if (!ic_rings || ic_rings->empty()) {
+    std::fprintf(stderr, "[primary] no interconnect rings configured\n");
+    return 0;
+  }
+  
+  for (const auto& r : *ic_rings) {
+    rte_ring* ptr = nullptr;
+    int rc = create_ring_(r.name, r.size ? r.size : cfg_.defaults.ring_size, &ptr);
+    if (rc) return rc;
+    
+    std::fprintf(stderr, "[ring] created INTERCONNECT: %s (size=%u)\n",
+                 r.name.c_str(), rte_ring_get_size(ptr));
+    
+    // Classify by direction based on naming convention
+    // pg_to_pu = primary-gnb TX (sends to primary-ue)
+    // pu_to_pg = primary-gnb RX (receives from primary-ue)
+    if (r.name.find("pg_to_pu") != std::string::npos) {
+      ic_tx_rings_.push_back(ptr);
+    } else if (r.name.find("pu_to_pg") != std::string::npos) {
+      ic_rx_rings_.push_back(ptr);
+    } else {
+      // Default: first half are TX, second half are RX
+      if (ic_tx_rings_.size() + ic_rx_rings_.size() < ic_rings->size() / 2) {
+        ic_tx_rings_.push_back(ptr);
+      } else {
+        ic_rx_rings_.push_back(ptr);
+      }
+    }
+  }
+  
+  std::fprintf(stderr, "[primary] interconnect created: %zu TX rings, %zu RX rings\n",
+               ic_tx_rings_.size(), ic_rx_rings_.size());
+  return 0;
+}
+
+// Lookup interconnect rings (primary-ue only)
+int FlexSDRPrimary::lookup_interconnect_() {
+  std::fprintf(stderr, "[primary] looking up interconnect rings...\n");
+  
+  // Get interconnect ring specs from config
+  const std::vector<conf::RingSpec>* ic_rings = nullptr;
+  if (cfg_.primary_ue.has_value() && cfg_.primary_ue->interconnect.has_value()) {
+    ic_rings = &cfg_.primary_ue->interconnect->rings;
+  }
+  
+  if (!ic_rings || ic_rings->empty()) {
+    std::fprintf(stderr, "[primary] no interconnect rings configured\n");
+    return 0;
+  }
+  
+  for (const auto& r : *ic_rings) {
+    rte_ring* ptr = nullptr;
+    int rc = lookup_ring_(r.name, &ptr);
+    if (rc) {
+      std::fprintf(stderr, "[primary] WARNING: interconnect ring not found: %s\n", r.name.c_str());
+      return rc;
+    }
+    
+    std::fprintf(stderr, "[ring] found INTERCONNECT: %s (size=%u)\n",
+                 r.name.c_str(), rte_ring_get_size(ptr));
+    
+    // Classify by direction based on naming convention
+    // pg_to_pu = primary-ue RX (receives from primary-gnb)
+    // pu_to_pg = primary-ue TX (sends to primary-gnb)
+    if (r.name.find("pg_to_pu") != std::string::npos) {
+      ic_rx_rings_.push_back(ptr);
+    } else if (r.name.find("pu_to_pg") != std::string::npos) {
+      ic_tx_rings_.push_back(ptr);
+    } else {
+      // Default: first half are RX (opposite of GNB), second half are TX
+      if (ic_rx_rings_.size() + ic_tx_rings_.size() < ic_rings->size() / 2) {
+        ic_rx_rings_.push_back(ptr);
+      } else {
+        ic_tx_rings_.push_back(ptr);
+      }
+    }
+  }
+  
+  std::fprintf(stderr, "[primary] interconnect found: %zu RX rings, %zu TX rings\n",
+               ic_rx_rings_.size(), ic_tx_rings_.size());
   return 0;
 }
 
