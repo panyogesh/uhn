@@ -101,6 +101,8 @@ static bool parse_cli(int argc, char** argv, Cli& cli) {
 
 // TX TEST
 void test_tx_transmission(uhd::tx_streamer::sptr tx_stream, int max_bursts) {
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+
     std::cout << "\n========================================\n";
     std::cout << "TX TEST: Transmitting IQ samples\n";
     std::cout << "========================================\n";
@@ -390,6 +392,8 @@ int main(int argc, char** argv) {
 
         // Run test based on mode
         const int TARGET_PACKETS = 400;  // Target packets in each direction
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(180));  // Let RX stream initialize
         
         if (cli.mode == "tx") {
             std::cout << "[INFO] Running TX test - sending " << TARGET_PACKETS << " bursts to primary\n\n";
