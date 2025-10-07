@@ -2,8 +2,10 @@
 
 #include <string>
 #include <vector>
+#include <deque>
 
 #include <rte_mempool.h>
+#include <rte_mbuf.h>
 #include <rte_ring.h>
 
 #include "conf/config_params.hpp"
@@ -14,7 +16,7 @@ namespace flexsdr {
 class FlexSDRSecondary : public TxBackend {
 public:
   explicit FlexSDRSecondary(std::string yaml_path);
-  ~FlexSDRSecondary() override = default;
+  ~FlexSDRSecondary() override;
   
   int init_resources(); // lookup-only
 
@@ -89,6 +91,23 @@ private:
   std::vector<rte_mempool*> pools_;
   std::vector<rte_ring*>    tx_rings_;
   std::vector<rte_ring*>    rx_rings_;
+  
+  // Per-channel mbuf cache to avoid repeated allocations
+  // Each channel maintains a small cache of pre-allocated mbufs
+  std::vector<std::deque<rte_mbuf*>> mbuf_cache_;
+  static constexpr size_t MBUF_CACHE_SIZE = 32;  // Cache size per channel
+  
+  // Helper to get mbuf from cache or allocate new one
+  rte_mbuf* get_mbuf_from_cache(size_t chan);
+  
+  // Helper to return unused mbuf to cache
+  void return_mbuf_to_cache(size_t chan, rte_mbuf* m);
+  
+  // Initialize mbuf cache for all channels
+  int init_mbuf_cache_();
+  
+  // Cleanup mbuf cache
+  void cleanup_mbuf_cache_();
 };
 
 } // namespace flexsdr

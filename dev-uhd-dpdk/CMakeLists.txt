@@ -227,10 +227,33 @@ target_link_libraries(test_flexsdr_factory PRIVATE
   Threads::Threads
 )
 
+# FlexSDR Library Test (OAI integration test)
+add_executable(test_flexsdr_lib
+  test/test_flexsdr_lib.cpp
+  test/flexsdr_lib.cpp
+)
+target_include_directories(test_flexsdr_lib PRIVATE
+  ${CMAKE_SOURCE_DIR}/test              # For common_lib.h
+  ${PROJ_INCLUDE_DIR}
+  ${PROJ_INCLUDE_DEV}
+  ${PROJ_INCLUDE_TRAN}
+  ${PROJ_INCLUDE_CONF}
+  ${GENERATED_PROTO_DIR}
+)
+target_link_libraries(test_flexsdr_lib PRIVATE
+  flexsdr_device
+  flexsdr_eal
+  flexsdr_secondary
+  flexsdr_cfg
+  UHD::UHD
+  PkgConfig::libdpdk
+  Threads::Threads
+)
+
 # ---- Warnings & (optional) ISA tweaks -------------------------------------
 foreach(tgt IN ITEMS
   flexsdr_cfg flexsdr_eal flexsdr_primary flexsdr_secondary
   flexsdr_grpc flexsdr_device
-  test_flexsdr_factory)
+  test_flexsdr_factory test_flexsdr_lib)
   target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wno-pedantic)
 endforeach()
